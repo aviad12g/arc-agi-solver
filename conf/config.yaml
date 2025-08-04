@@ -1,0 +1,44 @@
+# ARC-AGI Solver Configuration
+# Main configuration file with hierarchical parameter groups
+
+defaults:
+  - perception: default
+  - reasoning: default
+  - search: default
+  - system: default
+  - _self_
+
+# Global solver settings
+solver:
+  name: "arc-agi-solver"
+  version: "0.1.0"
+  max_program_length: 4  # K=4 from requirements
+  timeout_seconds: 30.0  # Hard timeout per puzzle
+  
+# Logging configuration
+logging:
+  level: INFO
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  file: null  # Set to path for file logging
+  
+# Performance targets from requirements
+performance:
+  target_accuracy: 0.35  # ≥35% on ARC-AGI-2
+  median_runtime: 0.5    # ≤0.5s per puzzle
+  max_runtime_95th: 5.0  # ≤5s 95th percentile
+  max_gpu_memory: 2.0    # ≤2GB GPU memory
+  max_ram_memory: 6.0    # ≤6GB RAM
+  
+# Experiment tracking
+experiment:
+  name: null  # Override with experiment name
+  tags: []    # List of experiment tags
+  notes: ""   # Experiment description
+  
+# Hydra configuration
+hydra:
+  run:
+    dir: outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}
+  sweep:
+    dir: multirun/${now:%Y-%m-%d}/${now:%H-%M-%S}
+    subdir: ${hydra:job.num}

@@ -1,0 +1,127 @@
+# System Configuration
+# Controls caching, I/O, hardware settings, and system-level parameters
+
+# Hardware settings
+hardware:
+  # GPU settings
+  gpu:
+    enabled: true  # Enable GPU acceleration
+    device_id: 0  # GPU device ID (0 for first GPU)
+    memory_limit: 2.0  # Maximum GPU memory in GB
+    fallback_to_cpu: true  # Fallback to CPU if GPU fails
+    
+  # CPU settings  
+  cpu:
+    num_threads: -1  # Number of threads (-1 for auto-detect)
+    max_memory: 6.0  # Maximum RAM usage in GB
+    
+# Caching settings
+caching:
+  # Redis cache settings
+  redis:
+    enabled: false  # Enable Redis caching (requires Redis server)
+    host: "localhost"
+    port: 6379
+    db: 0
+    password: null
+    connection_timeout: 5.0  # Connection timeout in seconds
+    
+  # Local file cache settings
+  file_cache:
+    enabled: true  # Enable local file caching
+    cache_dir: ".cache/arc_solver"  # Cache directory
+    max_cache_size: 1.0  # Maximum cache size in GB
+    cache_ttl: 86400  # Cache TTL in seconds (24 hours)
+    
+  # Cache strategies
+  strategies:
+    # Grid feature caching
+    grid_features:
+      enabled: true
+      key_strategy: "grid_hash"  # Use grid hash as key
+      compression: true  # Compress cached features
+      
+    # Program result caching
+    program_results:
+      enabled: true
+      key_strategy: "program_grid_hash"  # Use program+grid hash
+      max_entries: 10000  # Maximum cache entries
+      
+    # Heuristic value caching
+    heuristic_values:
+      enabled: true
+      key_strategy: "grid_pair_hash"  # Use grid pair hash
+      max_entries: 50000  # Maximum cache entries
+      
+# I/O settings
+io:
+  # Data loading
+  data_loading:
+    batch_size: 32  # Batch size for data loading
+    num_workers: 4  # Number of worker processes
+    prefetch_factor: 2  # Prefetch factor for data loading
+    
+  # Task caching
+  task_caching:
+    enabled: true  # Enable task caching
+    cache_format: "npz"  # Cache format (npz, pickle)
+    compress_cache: true  # Compress cached tasks
+    
+  # Output settings
+  output:
+    save_intermediate_results: false  # Save intermediate results
+    output_format: "json"  # Output format (json, pickle)
+    pretty_print: true  # Pretty print JSON output
+    
+# Monitoring and diagnostics
+monitoring:
+  # Performance monitoring
+  performance:
+    enabled: true  # Enable performance monitoring
+    sample_rate: 1.0  # Sampling rate (1.0 = all operations)
+    track_memory_usage: true  # Track memory usage
+    track_gpu_usage: true  # Track GPU usage
+    
+  # Profiling
+  profiling:
+    enabled: false  # Enable profiling (expensive)
+    profiler: "cProfile"  # Profiler to use
+    output_dir: "profiles"  # Profile output directory
+    
+  # Health checks
+  health_checks:
+    enabled: true  # Enable health checks
+    check_interval: 60.0  # Health check interval in seconds
+    memory_threshold: 0.9  # Memory usage threshold (90%)
+    
+# Error handling and recovery
+error_handling:
+  # Retry settings
+  retry:
+    max_retries: 3  # Maximum number of retries
+    retry_delay: 1.0  # Delay between retries in seconds
+    exponential_backoff: true  # Use exponential backoff
+    
+  # Fallback settings
+  fallback:
+    enable_cpu_fallback: true  # Enable CPU fallback for GPU operations
+    enable_simple_fallback: true  # Enable simple algorithm fallbacks
+    
+  # Recovery settings
+  recovery:
+    save_state_on_error: true  # Save state when errors occur
+    auto_restart: false  # Auto-restart on critical errors
+    
+# Development and debugging
+development:
+  # Debug settings
+  debug:
+    enabled: false  # Enable debug mode
+    verbose_logging: false  # Enable verbose logging
+    save_debug_info: false  # Save debug information
+    
+  # Testing settings
+  testing:
+    deterministic_mode: false  # Enable deterministic mode for testing
+    random_seed: 42  # Random seed for reproducibility
+    mock_gpu: false  # Mock GPU for testing without hardware

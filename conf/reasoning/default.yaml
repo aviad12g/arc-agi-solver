@@ -1,0 +1,70 @@
+# Reasoning Layer Configuration
+# Controls DSL engine, primitives, and program execution
+
+# DSL Engine settings
+dsl_engine:
+  max_program_length: 4  # K=4 maximum operations
+  max_execution_time: 0.001  # 1ms maximum per program
+  validate_programs: true  # Enable program validation
+  
+# DSL Primitives configuration
+primitives:
+  # Geometric transformations
+  geometric:
+    - name: "Rotate90"
+      enabled: true
+      max_time: 0.0002  # 200µs target per operation
+    - name: "Rotate180" 
+      enabled: true
+      max_time: 0.0002
+    - name: "ReflectH"
+      enabled: true
+      max_time: 0.0002
+    - name: "ReflectV"
+      enabled: true
+      max_time: 0.0002
+      
+  # Spatial operations
+  spatial:
+    - name: "Crop"
+      enabled: true
+      max_time: 0.0002
+      # Parameter generation limits
+      max_crop_regions: 20  # Limit crop region combinations
+    - name: "Paint"
+      enabled: true
+      max_time: 0.0002
+      # Parameter generation limits
+      max_paint_positions: 20  # Limit paint position combinations
+      
+  # Color manipulation
+  color:
+    - name: "MapColors"
+      enabled: true
+      max_time: 0.0002
+      # Parameter generation limits
+      max_color_mappings: 10  # Limit color mapping combinations
+      
+  # Conditional operations
+  conditional:
+    - name: "PaintIf"
+      enabled: false  # Disabled until predicates are fully implemented
+      max_time: 0.0002
+      
+# Program generation settings
+program_generation:
+  # Operation parameter limits to prevent combinatorial explosion
+  max_operations_per_type: 50  # Maximum operations per primitive type
+  prefer_simple_operations: true  # Prefer operations with fewer parameters
+  
+# Execution settings
+execution:
+  parallel_execution: false  # Disable parallel execution for now
+  cache_results: true  # Cache execution results
+  validate_outputs: true  # Validate program outputs
+  
+# Error handling
+error_handling:
+  continue_on_primitive_failure: true  # Continue if primitive fails
+  log_execution_errors: true  # Log execution errors
+  return_partial_results: true  # Return partial results on failure

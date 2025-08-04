@@ -1,0 +1,78 @@
+# LLM Integration Configuration
+# Controls LLM-based DSL program proposal generation
+
+# LLM Model Configuration
+model:
+  name: "Qwen/Qwen2.5-32B-Instruct"  # 32B model as specified in requirements
+  max_tokens: 256  # 256 tokens as specified
+  temperature: 0.7  # Balanced creativity vs consistency
+  top_p: 0.9  # Nucleus sampling
+  use_4bit_quantization: true  # Enable 4-bit quantization for efficiency
+  gpu_memory_fraction: 0.8  # Use 80% of available GPU memory
+  timeout_seconds: 10.0  # Timeout for generation
+
+# Proposal Generation
+proposals:
+  num_proposals: 3  # Generate top-3 candidates as specified
+  parsing_success_target: 0.95  # 95% parseability guarantee from requirements
+  max_retries: 2  # Retry failed generations
+  fallback_enabled: true  # Enable fallback to vanilla A* search
+
+# Prompt Configuration
+prompts:
+  template_type: "arc_standard"  # Use standard ARC prompt template
+  use_few_shot: true  # Enable few-shot examples
+  use_chain_of_thought: false  # Disable CoT for speed
+  max_examples: 4  # Maximum number of few-shot examples
+
+# Training Data Configuration
+training:
+  synthetic_data_enabled: true  # Enable synthetic data generation
+  num_synthetic_tasks: 300  # 300 synthetic tasks as specified
+  task_types: ["rotation", "reflection", "color_mapping", "cropping", "painting", "composite"]
+  difficulty_distribution:
+    easy: 0.4
+    medium: 0.4
+    hard: 0.2
+  
+  # Soft-prompt tuning (if implemented)
+  soft_prompt_length: 256  # 256 tokens as specified
+  tuning_epochs: 1  # Single epoch as specified
+  learning_rate: 1e-4
+  batch_size: 2  # Small batch size for large model
+
+# Integration with Search
+search_integration:
+  enabled: true  # Enable LLM integration with search
+  beam_width_reduction: true  # Enable beam width reduction from 64 to 8
+  original_beam_width: 64
+  llm_beam_width: 8  # Reduced beam width with LLM proposals
+  priority_boost: 2.0  # Priority boost for LLM proposals in search
+  
+  # Fallback configuration
+  fallback_on_parsing_failure: true  # Fallback if parsing fails
+  fallback_on_timeout: true  # Fallback on generation timeout
+  fallback_on_model_error: true  # Fallback on model errors
+
+# Performance Monitoring
+monitoring:
+  track_generation_time: true  # Track LLM generation time
+  track_parsing_success: true  # Track parsing success rate
+  track_proposal_quality: true  # Track proposal quality metrics
+  log_failed_parses: false  # Log failed parsing attempts (can be verbose)
+  save_proposals: false  # Save generated proposals for analysis
+
+# Caching
+caching:
+  enabled: true  # Enable caching of LLM proposals
+  cache_key_include_features: true  # Include feature vectors in cache key
+  cache_ttl: 3600  # Cache TTL in seconds (1 hour)
+  max_cache_size: 1000  # Maximum number of cached proposals
+
+# Development and Debugging
+debug:
+  enabled: false  # Enable debug mode
+  save_prompts: false  # Save generated prompts
+  save_responses: false  # Save raw LLM responses
+  verbose_parsing: false  # Verbose parsing logs
+  mock_llm: false  # Use mock LLM for testing (returns dummy proposals)

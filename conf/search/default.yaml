@@ -1,0 +1,71 @@
+# Search Layer Configuration
+# Controls A* search, heuristics, and beam search parameters
+
+# A* Search settings
+astar:
+  max_program_length: 4  # K=4 from requirements
+  max_nodes_expanded: 600  # ≤600 expanded states target
+  max_computation_time: 30.0  # 30 second timeout
+  duplicate_detection: true  # Enable duplicate state detection
+  early_termination: true  # Enable early termination on exact match
+  
+# Beam search settings
+beam_search:
+  initial_beam_width: 64  # Initial beam width
+  adaptive_beam: true  # Enable adaptive beam width reduction
+  min_beam_width: 8  # Minimum beam width
+  beam_reduction_factor: 0.7  # Factor to reduce beam when needed
+  beam_reduction_threshold: 0.5  # Reduce beam when >50% nodes expanded
+  
+# Heuristic system settings
+heuristics:
+  # Two-tier heuristic system
+  use_tier2: true  # Enable Tier 2 heuristic
+  tier2_threshold: 5.0  # Threshold for Tier 2 activation
+  
+  # Tier 1: L₂ spectral heuristic
+  tier1:
+    name: "L2_Spectral"
+    max_computation_time: 0.0005  # 500µs target
+    use_d4_minimization: false  # Disable D₄ minimization for speed
+    cache_features: true  # Cache feature vectors
+    
+  # Tier 2: Hungarian assignment heuristic  
+  tier2:
+    name: "Hungarian_Assignment"
+    max_computation_time: 0.002  # 2ms target
+    use_scipy: true  # Use SciPy for Hungarian algorithm
+    fallback_greedy: true  # Fallback to greedy assignment
+    
+# Search strategy settings
+strategy:
+  # Cost function
+  uniform_cost: true  # Each operation costs 1
+  prefer_shorter_programs: true  # Tie-breaking prefers shorter programs
+  
+  # Exploration vs exploitation
+  exploration_bonus: 0.0  # No exploration bonus (pure A*)
+  
+  # Termination conditions
+  exact_match_only: false  # Accept approximate solutions
+  min_improvement_threshold: 0.1  # Minimum heuristic improvement
+  
+# Performance monitoring
+monitoring:
+  track_search_stats: true  # Track detailed search statistics
+  log_beam_reductions: true  # Log beam width reductions
+  warn_slow_heuristics: true  # Warn on slow heuristic computations
+  save_search_tree: false  # Save search tree for debugging (expensive)
+  
+# Advanced settings
+advanced:
+  # Node ordering
+  tie_breaking_strategy: "cost_then_depth"  # cost < depth for tie-breaking
+  
+  # Memory management
+  max_memory_usage: 1.0  # Maximum memory usage in GB
+  garbage_collect_frequency: 1000  # GC every N node expansions
+  
+  # Debugging
+  debug_mode: false  # Enable debug mode (slower)
+  save_failed_searches: false  # Save failed searches for analysis

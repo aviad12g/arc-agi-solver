@@ -1,0 +1,54 @@
+# Perception Layer Configuration
+# Controls blob labeling, feature extraction, and symmetry detection
+
+# Blob labeling settings
+blob_labeling:
+  use_gpu: true  # Enable GPU acceleration when available
+  fallback_to_cpu: true  # Automatic fallback if GPU fails
+  max_labeling_time: 0.002  # ≤2ms per 30×30 grid target
+  connectivity: 4  # 4-connected or 8-connected components
+  
+# Feature extraction settings
+features:
+  # Orbit signature computation (D₄ symmetry fingerprinting)
+  orbit_signature:
+    enabled: true
+    dimension: 8  # 8-dimensional orbit signatures
+    
+  # Spectral features (Laplacian eigenvalues)
+  spectral:
+    enabled: true
+    dimension: 3  # λ₂, λ₃, λ₄ eigenvalues
+    eigenvalue_tolerance: 1e-3  # Stability tolerance
+    max_eigenvalue_time: 0.001  # Maximum computation time
+    
+  # Persistent homology features
+  persistence:
+    enabled: true
+    dimension: 32  # 32-length landscape vectors
+    max_homology_time: 0.002  # Maximum computation time
+    cubical_complex: true  # Use cubical complexes
+    
+  # Zernike moment features
+  zernike:
+    enabled: true
+    dimension: 7  # Complex moment invariants
+    max_order: 4  # Maximum moment order (p+q≤4)
+    invariance_tolerance: 1e-6  # D₄ invariance tolerance
+    
+  # Combined feature vector
+  total_dimension: 50  # Total 50D feature vectors
+  
+# Symmetry detection settings
+symmetry:
+  use_bitboards: true  # Use uint64 bitboard representation
+  max_detection_time: 0.00001  # ≤10µs target
+  early_exit: true  # Early exit on global symmetry detection
+  check_rotations: true  # Check 4 rotations
+  check_reflections: true  # Check 4 reflections
+  
+# Performance monitoring
+monitoring:
+  track_timing: true  # Track computation times
+  warn_slow_operations: true  # Warn on slow operations
+  log_feature_failures: true  # Log feature computation failures
