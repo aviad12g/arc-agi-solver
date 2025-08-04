@@ -411,6 +411,20 @@ class ColorPredicate(BlobPredicate):
         return blob_color in self.target_colors
 
 
+class HorizontalLinePredicate(BlobPredicate):
+    """Predicate that checks if a blob forms a horizontal line (height = 1)."""
+    def evaluate(self, blob_pixels: List[Tuple[int, int]], blob_color: int, grid: np.ndarray) -> bool:
+        rows = [r for r, _ in blob_pixels]
+        return max(rows) == min(rows)  # single row
+
+
+class VerticalLinePredicate(BlobPredicate):
+    """Predicate that checks if a blob forms a vertical line (width = 1)."""
+    def evaluate(self, blob_pixels: List[Tuple[int, int]], blob_color: int, grid: np.ndarray) -> bool:
+        cols = [c for _, c in blob_pixels]
+        return max(cols) == min(cols)  # single column
+
+
 class PaintIf(DSLPrimitive):
     """Conditionally paint blobs based on predicates."""
     

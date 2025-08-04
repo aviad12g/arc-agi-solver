@@ -192,6 +192,28 @@ class BitboardSymmetryDetector:
         """
         return bitarray[transform_indices]
     
+    def _apply_symmetry_numpy(self, grid: np.ndarray, sym_type: SymmetryType) -> np.ndarray:
+        """Apply a symmetry transform to a grid using numpy operations.
+        Fallback method for non-square grids where the bitboard trick is not applicable.
+        """
+        if sym_type == SymmetryType.IDENTITY:
+            return grid
+        if sym_type == SymmetryType.ROTATE_90:
+            return np.rot90(grid, k=1)
+        if sym_type == SymmetryType.ROTATE_180:
+            return np.rot90(grid, k=2)
+        if sym_type == SymmetryType.ROTATE_270:
+            return np.rot90(grid, k=3)
+        if sym_type == SymmetryType.REFLECT_H:
+            return np.flipud(grid)
+        if sym_type == SymmetryType.REFLECT_V:
+            return np.fliplr(grid)
+        if sym_type == SymmetryType.REFLECT_D1:
+            return np.transpose(grid)
+        if sym_type == SymmetryType.REFLECT_D2:
+            return np.fliplr(np.rot90(grid, k=1))
+        return grid
+
     def detect_symmetries(self, grid: np.ndarray) -> Set[SymmetryType]:
         """Detect all symmetries present in the grid.
         
@@ -205,10 +227,20 @@ class BitboardSymmetryDetector:
         
         height, width = grid.shape
         
-        # Only handle square grids for now
-        if height != width:
-            logger.warning(f"Non-square grid {height}×{width}, symmetry detection limited")
-            return {SymmetryType.IDENTITY}
+        # Handle non-square grids by fallback to numpy-based comparison
+        is_square = height == width
+        symmetries = {SymmetryType.IDENTITY}
+
+        if not is_square:
+            # Fallback: brute-force compare transformed arrays
+            candidates = [SymmetryType.REFLECT_H, SymmetryType.REFLECT_V, SymmetryType.ROTATE_180]
+            for sym_type in candidates:
+                transformed = self._apply_symmetry_numpy(grid, sym_type)
+                if transformed.shape != grid.shape:
+                    continue  # rotation 90/270 on rectangles changes shape
+                if np.array_equal(grid, transformed):
+                    symmetries.add(sym_type)
+            return symmetries
         
         size = height
         symmetries = {SymmetryType.IDENTITY}  # Identity is always present

@@ -99,6 +99,100 @@ class BlobLabeler:
         ''', 'union_find_kernel')
         
         logger.info("GPU kernels initialized successfully")
+
+    def _cuda_connected_components(self, mask, connectivity: int):
+        """Apply custom CUDA union-find kernel for connected components.
+        
+        Args:
+            mask: Binary mask (True for foreground, False for background)
+            connectivity: 4 or 8 connectivity
+            
+        Returns:
+            Tuple of (labeled_array, num_components)
+        """
+        height, width = mask.shape
+        total_pixels = height * width
+        
+        # Initialize parent array - each pixel is its own parent initially
+        parent = cp.arange(total_pixels, dtype=cp.int32)
+        
+        # Convert mask to int32 labels (0 for background, 1 for foreground)
+        labels = mask.astype(cp.int32)
+        
+        # Launch union-find kernel
+        threads_per_block = 256
+        blocks_per_grid = (total_pixels + threads_per_block - 1) // threads_per_block
+        
+        # Run multiple iterations to ensure convergence
+        for iteration in range(10):  # Usually converges in 2-3 iterations
+            old_parent = parent.copy()
+            
+            self.union_find_kernel(
+                (blocks_per_grid,), (threads_per_block,),
+                (labels, parent, height, width)
+            )
+            
+            # Check for convergence
+            if cp.array_equal(parent, old_parent):
+                break
+        
+        # Compress paths and assign dense labels
+        return self._compress_and_relabel(labels, parent, height, width)
+    
+    def _compress_and_relabel(self, labels, parent, height: int, width: int):
+        """Compress union-find paths and assign dense component labels.
+        
+        Args:
+            labels: Original foreground/background labels
+            parent: Union-find parent array
+            height: Grid height
+            width: Grid width
+            
+        Returns:
+            Tuple of (dense_labeled_array, num_components)
+        """
+        # Find root for each pixel
+        flat_labels = labels.flatten()
+        result = cp.zeros_like(flat_labels)
+        
+        # Only process foreground pixels
+        foreground_mask = flat_labels > 0
+        foreground_indices = cp.where(foreground_mask)[0]
+        
+        if len(foreground_indices) == 0:
+            return result.reshape(height, width), 0
+        
+        # Find roots using path compression
+        roots = cp.zeros_like(foreground_indices)
+        for i, idx in enumerate(foreground_indices):
+            # Path compression: find root and compress path
+            root = int(idx)
+            path = []
+            while parent[root] != root:
+                path.append(root)
+                root = int(parent[root])
+            
+            # Compress path
+            for p in path:
+                parent[p] = root
+            
+            roots[i] = root
+        
+        # Get unique roots and assign dense labels
+        unique_roots = cp.unique(roots)
+        num_components = len(unique_roots)
+        
+        # Create mapping from root to dense label
+        root_to_label = cp.zeros(parent.shape[0], dtype=cp.int32)
+        for i, root in enumerate(unique_roots):
+            root_to_label[root] = i + 1  # Labels start from 1
+        
+        # Assign dense labels to result
+        for i, idx in enumerate(foreground_indices):
+            root = roots[i]
+            result[idx] = root_to_label[root]
+        
+        return result.reshape(height, width), num_components
     
     def label_blobs(self, grid: np.ndarray, connectivity: int = 4) -> Tuple[List[Blob], float]:
         """Label connected components (blobs) in the grid.
@@ -138,13 +232,7 @@ class BlobLabeler:
         gpu_grid = cp.asarray(grid, dtype=cp.int32)
         height, width = gpu_grid.shape
         
-        # Use CuPy's connected components for initial labeling
-        if connectivity == 4:
-            structure = cp.array([[0, 1, 0], [1, 1, 1], [0, 1, 0]], dtype=cp.bool_)
-        else:  # connectivity == 8
-            structure = cp.ones((3, 3), dtype=cp.bool_)
-        
-        # Label connected components for each color separately
+        # Use custom CUDA union-find kernel for high performance
         unique_colors = cp.unique(gpu_grid)
         all_blobs = []
         
@@ -155,8 +243,17 @@ class BlobLabeler:
             # Create binary mask for this color
             color_mask = (gpu_grid == color)
             
-            # Label connected components
-            labeled_array, num_features = cp_ndimage.label(color_mask, structure=structure)
+            # Apply custom union-find kernel
+            try:
+                labeled_array, num_features = self._cuda_connected_components(color_mask, connectivity)
+            except Exception as e:
+                logger.warning(f"CUDA kernel failed, falling back to CuPy: {e}")
+                # Fallback to CuPy implementation
+                if connectivity == 4:
+                    structure = cp.array([[0, 1, 0], [1, 1, 1], [0, 1, 0]], dtype=cp.bool_)
+                else:  # connectivity == 8
+                    structure = cp.ones((3, 3), dtype=cp.bool_)
+                labeled_array, num_features = cp_ndimage.label(color_mask, structure=structure)
             
             # Extract blob information
             for blob_id in range(1, num_features + 1):
@@ -184,12 +281,73 @@ class BlobLabeler:
                         bounding_box=(min_row, min_col, max_row, max_col),
                         center_of_mass=(center_row, center_col),
                         area=len(coords_cpu),
-                        holes=0  # TODO: Implement hole detection
+                        holes=self._count_holes(grid, coords_cpu, (min_row, min_col, max_row, max_col), int(color))
                     )
                     all_blobs.append(blob)
         
         return all_blobs
     
+    def _count_holes(self, grid: np.ndarray, pixel_coords: List[Tuple[int, int]], bounding_box: Tuple[int, int, int, int], blob_color: int) -> int:
+        """Count topological holes within a blob using flood-fill.
+
+        Args:
+            grid: Original grid array.
+            pixel_coords: Coordinates belonging to the blob (row, col).
+            bounding_box: (min_row, min_col, max_row, max_col) of the blob.
+            blob_color: Color value of the blob.
+
+        Returns:
+            Number of background connected components fully enclosed by the blob.
+        """
+        min_row, min_col, max_row, max_col = bounding_box
+        sub_h = max_row - min_row + 1
+        sub_w = max_col - min_col + 1
+        # Build binary mask of blob inside bounding box
+        mask = np.zeros((sub_h, sub_w), dtype=np.uint8)
+        for r, c in pixel_coords:
+            mask[r - min_row, c - min_col] = 1  # foreground
+        # Background mask (0 where foreground)
+        bg = 1 - mask
+        visited = np.zeros_like(bg, dtype=bool)
+        h, w = bg.shape
+        offsets = [(-1, 0), (1, 0), (0, -1), (0, 1)]
+        from collections import deque
+        # 1. Mark background connected to border (outside) so they're not holes
+        queue = deque()
+        for r in range(h):
+            for c in (0, w - 1):
+                if bg[r, c] and not visited[r, c]:
+                    visited[r, c] = True
+                    queue.append((r, c))
+        for c in range(w):
+            for r in (0, h - 1):
+                if bg[r, c] and not visited[r, c]:
+                    visited[r, c] = True
+                    queue.append((r, c))
+        while queue:
+            r, c = queue.popleft()
+            for dr, dc in offsets:
+                nr, nc = r + dr, c + dc
+                if 0 <= nr < h and 0 <= nc < w and bg[nr, nc] and not visited[nr, nc]:
+                    visited[nr, nc] = True
+                    queue.append((nr, nc))
+        # 2. Remaining unvisited background components inside mask are holes.
+        holes = 0
+        for r in range(h):
+            for c in range(w):
+                if bg[r, c] and not visited[r, c]:
+                    holes += 1
+                    visited[r, c] = True
+                    queue = deque([(r, c)])
+                    while queue:
+                        rr, cc = queue.popleft()
+                        for dr, dc in offsets:
+                            nr, nc = rr + dr, cc + dc
+                            if 0 <= nr < h and 0 <= nc < w and bg[nr, nc] and not visited[nr, nc]:
+                                visited[nr, nc] = True
+                                queue.append((nr, nc))
+        return holes
+
     def _label_blobs_cpu(self, grid: np.ndarray, connectivity: int) -> List[Blob]:
         """CPU fallback blob labeling using flood-fill algorithm."""
         height, width = grid.shape
@@ -245,7 +403,7 @@ class BlobLabeler:
                         bounding_box=(min_row, min_col, max_row, max_col),
                         center_of_mass=(center_row, center_col),
                         area=len(blob_coords),
-                        holes=0  # TODO: Implement hole detection
+                        holes=self._count_holes(grid, blob_coords, (min_row, min_col, max_row, max_col), color)
                     )
                     blobs.append(blob)
         
