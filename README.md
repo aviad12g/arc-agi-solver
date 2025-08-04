@@ -23,11 +23,37 @@ Our system transforms raw pixel grids into rich symbolic representations through
 
 The ARC-AGI Solver employs a four-stage pipeline that transforms visual patterns into executable programs:
 
-```
-┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
-│   Perception    │───▶│   Reasoning     │───▶│     Search      │───▶│   Synthesis     │
-│    Module       │    │     Engine      │    │    Engine       │    │    Module       │
-└─────────────────┘    └─────────────────┘    └─────────────────┘    └─────────────────┘
+```mermaid
+graph TD
+    A["Raw ARC Grid<br/>30×30 pixels"] --> B["GPU Blob Labeling<br/>Union-Find Algorithm"]
+    B --> C["Connected Components<br/>+ Hole Detection"]
+    C --> D["Symmetry Analysis<br/>D₄ Group Operations"]
+    D --> E["Feature Extraction<br/>50-D Vector"]
+    
+    E --> F["DSL Program Space<br/>Geometric + Color Operations"]
+    F --> G["A* Search Engine<br/>Two-Tier Heuristics"]
+    G --> H["LLM Proposals<br/>Optional Enhancement"]
+    H --> I["Solution Program<br/>Minimal DSL Sequence"]
+    
+    subgraph "Perception Module"
+        B
+        C
+        D
+        E
+    end
+    
+    subgraph "Reasoning Engine"
+        F
+    end
+    
+    subgraph "Search Engine"
+        G
+        H
+    end
+    
+    subgraph "Synthesis Module"
+        I
+    end
 ```
 
 graph TD
@@ -110,6 +136,37 @@ The search engine employs **admissible A* search** with sophisticated heuristics
 #### Two-Tier Heuristic System
 1. **Tier-1 (ℓ₂ distance)**: Euclidean distance in 50-dimensional feature space
 2. **Tier-2 (Hungarian algorithm)**: Optimal blob-to-blob assignment costs
+
+```mermaid
+graph LR
+    subgraph "Input Grid Analysis"
+        A[Grid G₁] --> B[Blob Detection]
+        B --> C[Feature Vector F₁ ∈ ℝ⁵⁰]
+    end
+    
+    subgraph "Target Grid Analysis"
+        D[Grid G₂] --> E[Blob Detection]
+        E --> F[Feature Vector F₂ ∈ ℝ⁵⁰]
+    end
+    
+    subgraph "Heuristic Computation"
+        C --> G["Tier-1: ||F₂ - F₁||₂"]
+        F --> G
+        C --> H["Tier-2: Hungarian<br/>Blob Assignment"]
+        F --> H
+        G --> I["h(G₁, G₂) = αh₁ + βh₂"]
+        H --> I
+    end
+    
+    subgraph "Search Process"
+        I --> J["A* Priority Queue"]
+        J --> K["Beam Search<br/>Width = 32"]
+        K --> L["DSL Program<br/>Generation"]
+        L --> M{"Solution<br/>Found?"}
+        M -->|No| J
+        M -->|Yes| N["Optimal Program P*"]
+    end
+```
 
 #### Search Optimizations
 - **Beam search** with configurable width for computational tractability
