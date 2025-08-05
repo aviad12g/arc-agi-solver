@@ -103,6 +103,12 @@ Examples:
         help='Save search tree for debugging'
     )
     
+    solve_parser.add_argument(
+        '--disable-multi-example',
+        action='store_true',
+        help='Disable multi-example validation (use only first training example)'
+    )
+    
     # Batch command
     batch_parser = subparsers.add_parser(
         'batch',
@@ -153,6 +159,12 @@ Examples:
         type=int,
         default=10,
         help='Progress report interval (default: 10)'
+    )
+    
+    batch_parser.add_argument(
+        '--disable-multi-example',
+        action='store_true',
+        help='Disable multi-example validation for batch processing'
     )
     
     # Config command

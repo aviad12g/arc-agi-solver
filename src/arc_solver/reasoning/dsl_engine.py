@@ -123,15 +123,26 @@ class DSLEngine:
     """Engine for executing DSL programs and managing primitives."""
     
     def __init__(self, max_program_length: int = 4, 
-                 max_execution_time: float = 0.001):
+                 max_execution_time: float = 0.001,
+                 adaptive_length_limits: bool = True):
         """Initialize DSL engine.
         
         Args:
-            max_program_length: Maximum length of programs (K=4 in spec)
+            max_program_length: Default maximum length of programs (K=4 in spec)
             max_execution_time: Maximum execution time per program
+            adaptive_length_limits: Whether to use adaptive length limits based on search mode
         """
         self.max_program_length = max_program_length
         self.max_execution_time = max_execution_time
+        self.adaptive_length_limits = adaptive_length_limits
+        
+        # Adaptive length limits for different search modes
+        self.length_limits = {
+            'pure_astar': 4,      # K=4 for pure A* search (performance guarantee)
+            'llm_guided': 6,      # K=5-6 for LLM-guided programs
+            'hybrid': 5,          # K=5 for hybrid search
+            'default': max_program_length
+        }
         
         # Load all primitives
         self.primitives = create_all_primitives()
@@ -141,6 +152,9 @@ class DSLEngine:
         self.total_execution_time = 0.0
         
         logger.info(f"DSL Engine initialized with {len(self.primitives)} primitives")
+        logger.info(f"Adaptive length limits: {self.adaptive_length_limits}")
+        if self.adaptive_length_limits:
+            logger.info(f"Length limits by mode: {self.length_limits}")
     
     def execute_program(self, program: DSLProgram, 
                        input_grid: np.ndarray) -> Tuple[np.ndarray, Dict[str, Any]]:
@@ -304,9 +318,31 @@ class DSLEngine:
             logger.warning(f"Failed to apply operation {operation}: {e}")
             return grid.copy()  # Return unchanged grid on failure
     
-    def create_empty_program(self) -> DSLProgram:
-        """Create an empty DSL program."""
-        return DSLProgram([], self.max_program_length)
+    def create_empty_program(self, search_mode: str = 'default') -> DSLProgram:
+        """Create an empty DSL program with appropriate length limit.
+        
+        Args:
+            search_mode: Search mode to determine length limit
+            
+        Returns:
+            Empty DSL program with appropriate max length
+        """
+        max_length = self.get_max_length_for_mode(search_mode)
+        return DSLProgram([], max_length)
+    
+    def create_program(self, operations: List[DSLOperation], 
+                      search_mode: str = 'default') -> DSLProgram:
+        """Create a DSL program with appropriate length limit.
+        
+        Args:
+            operations: List of operations
+            search_mode: Search mode to determine length limit
+            
+        Returns:
+            DSL program with appropriate max length
+        """
+        max_length = self.get_max_length_for_mode(search_mode)
+        return DSLProgram(operations, max_length)
     
     def get_primitive_names(self) -> List[str]:
         """Get list of available primitive names."""
@@ -328,6 +364,133 @@ class DSLEngine:
         """Reset execution statistics."""
         self.execution_count = 0
         self.total_execution_time = 0.0
+    
+    def get_max_length_for_mode(self, search_mode: str = 'default') -> int:
+        """Get maximum program length for a specific search mode.
+        
+        Args:
+            search_mode: Search mode ('pure_astar', 'llm_guided', 'hybrid', 'default')
+            
+        Returns:
+            Maximum program length for the specified mode
+        """
+        if not self.adaptive_length_limits:
+            return self.max_program_length
+        
+        return self.length_limits.get(search_mode, self.max_program_length)
+    
+    def set_length_limit_for_mode(self, search_mode: str, max_length: int) -> None:
+        """Set maximum program length for a specific search mode.
+        
+        Args:
+            search_mode: Search mode to configure
+            max_length: Maximum program length for this mode
+        """
+        if not self.adaptive_length_limits:
+            logger.warning("Adaptive length limits are disabled")
+            return
+        
+        self.length_limits[search_mode] = max_length
+        logger.info(f"Set length limit for {search_mode}: {max_length}")
+    
+    def compute_program_complexity(self, program: DSLProgram) -> float:
+        """Compute complexity score for a DSL program.
+        
+        The complexity score considers:
+        - Program length (longer = more complex)
+        - Primitive complexity (some primitives are more complex than others)
+        - Parameter complexity (more parameters = more complex)
+        
+        Args:
+            program: DSL program to score
+            
+        Returns:
+            Complexity score (higher = more complex)
+        """
+        if len(program) == 0:
+            return 0.0
+        
+        # Base complexity from program length
+        length_complexity = len(program) / self.max_program_length
+        
+        # Primitive complexity weights
+        primitive_weights = {
+            # Simple geometric transforms (low complexity)
+            'Rotate90': 1.0,
+            'Rotate180': 1.0,
+            'ReflectH': 1.0,
+            'ReflectV': 1.0,
+            
+            # Spatial operations (medium complexity)
+            'Translate': 2.0,
+            'Scale': 2.5,
+            'Extract': 2.0,
+            'Crop': 2.0,
+            'Paint': 1.5,
+            
+            # Color manipulation (medium complexity)
+            'MapColors': 3.0,
+            
+            # Pattern manipulation (high complexity)
+            'FloodFill': 3.5,
+            'Overlay': 4.0,
+            'Repeat': 3.5,
+            
+            # Conditional operations (highest complexity)
+            'PaintIf': 5.0,
+        }
+        
+        # Compute weighted primitive complexity
+        primitive_complexity = 0.0
+        parameter_complexity = 0.0
+        
+        for operation in program.operations:
+            # Add primitive weight
+            weight = primitive_weights.get(operation.primitive_name, 3.0)
+            primitive_complexity += weight
+            
+            # Add parameter complexity (more parameters = more complex)
+            param_count = len(operation.parameters)
+            parameter_complexity += param_count * 0.5
+        
+        # Normalize by program length
+        avg_primitive_complexity = primitive_complexity / len(program)
+        avg_parameter_complexity = parameter_complexity / len(program)
+        
+        # Combine complexity components
+        total_complexity = (
+            0.4 * length_complexity +           # 40% from length
+            0.4 * avg_primitive_complexity +    # 40% from primitive complexity
+            0.2 * avg_parameter_complexity      # 20% from parameter complexity
+        )
+        
+        return total_complexity
+    
+    def should_allow_program_length(self, program_length: int, 
+                                  search_mode: str = 'default',
+                                  complexity_threshold: float = 10.0) -> bool:
+        """Determine if a program length should be allowed based on mode and complexity.
+        
+        Args:
+            program_length: Proposed program length
+            search_mode: Search mode being used
+            complexity_threshold: Maximum allowed complexity score
+            
+        Returns:
+            True if the program length should be allowed
+        """
+        max_length = self.get_max_length_for_mode(search_mode)
+        
+        # Always respect hard length limits
+        if program_length > max_length:
+            return False
+        
+        # For LLM-guided mode, allow longer programs if complexity is reasonable
+        if search_mode == 'llm_guided' and program_length <= 6:
+            return True
+        
+        # For other modes, use standard length limits
+        return program_length <= max_length
     
     def enumerate_programs(self, max_length: Optional[int] = None) -> List[DSLProgram]:
         """Enumerate all possible programs up to a given length.
@@ -390,13 +553,16 @@ class DSLEngine:
         return programs
 
 
-def create_dsl_engine(max_program_length: int = 4) -> DSLEngine:
+def create_dsl_engine(max_program_length: int = 4, 
+                     adaptive_length_limits: bool = True) -> DSLEngine:
     """Factory function to create a DSL engine.
     
     Args:
-        max_program_length: Maximum program length
+        max_program_length: Default maximum program length
+        adaptive_length_limits: Whether to use adaptive length limits
         
     Returns:
         Configured DSLEngine instance
     """
-    return DSLEngine(max_program_length=max_program_length)
+    return DSLEngine(max_program_length=max_program_length,
+                    adaptive_length_limits=adaptive_length_limits)

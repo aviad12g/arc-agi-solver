@@ -90,28 +90,25 @@ def load_task_from_file(file_path: Union[str, Path]) -> Task:
         with open(file_path, 'r') as f:
             task_data = json.load(f)
         
-        # Use ARCDataLoader to convert JSON to Task object
-        # For now, we'll create a simple Task object directly
-        from arc_solver.core.data_models import Task, TrainExample, TestExample
+        # Convert JSON to Task object
+        import numpy as np
+        from arc_solver.core.data_models import Task
         
         train_examples = []
         for example in task_data.get('train', []):
-            train_examples.append(TrainExample(
-                input=np.array(example['input'], dtype=np.int32),
-                output=np.array(example['output'], dtype=np.int32)
-            ))
+            input_grid = np.array(example['input'], dtype=np.int32)
+            output_grid = np.array(example['output'], dtype=np.int32)
+            train_examples.append((input_grid, output_grid))
         
-        test_examples = []
+        test_inputs = []
         for example in task_data.get('test', []):
-            test_examples.append(TestExample(
-                input=np.array(example['input'], dtype=np.int32),
-                output=np.array(example.get('output', []), dtype=np.int32) if 'output' in example else None
-            ))
+            test_input = np.array(example['input'], dtype=np.int32)
+            test_inputs.append(test_input)
         
         task = Task(
             task_id=file_path.stem,
-            train=train_examples,
-            test=test_examples
+            train_examples=train_examples,
+            test_inputs=test_inputs
         )
         
         return task

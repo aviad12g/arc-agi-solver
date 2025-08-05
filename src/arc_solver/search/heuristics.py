@@ -25,6 +25,7 @@ from arc_solver.perception.features import (
     create_orbit_signature_computer, create_spectral_feature_computer,
     create_persistence_computer, create_zernike_computer, BlobFeatures
 )
+from arc_solver.perception.symmetry import BitboardSymmetryDetector, get_d4_group_elements
 from arc_solver.reasoning.dsl_engine import DSLProgram
 
 logger = logging.getLogger(__name__)
@@ -135,8 +136,13 @@ class Tier1Heuristic(BaseHeuristic):
         self.persistence_computer = create_persistence_computer()
         self.zernike_computer = create_zernike_computer()
         
-        # Cache for feature vectors
+        # Initialize symmetry detector for D₄ transformations
+        self.symmetry_detector = BitboardSymmetryDetector()
+        self.d4_elements = get_d4_group_elements()
+        
+        # Cache for feature vectors and transformed features
         self.feature_cache = {}
+        self.transformed_feature_cache = {}
         
         logger.info("Tier 1 L₂ spectral heuristic initialized")
     
@@ -149,19 +155,16 @@ class Tier1Heuristic(BaseHeuristic):
         start_time = time.perf_counter()
         
         try:
-            # Extract features from both grids
+            # Extract features from target grid (fixed)
             target_features = self._extract_mean_features(target_grid)
-            current_features = self._extract_mean_features(current_grid)
             
-            # Compute L₂ distance
-            # For now, we don't consider D₄ symmetries (min over rotations/reflections)
-            # This could be added for better heuristic accuracy
-            distance = np.linalg.norm(target_features - current_features)
+            # Compute minimum distance over all D₄ transformations of current grid
+            min_distance = self._compute_d4_minimized_distance(current_grid, target_features)
             
             computation_time = time.perf_counter() - start_time
             
             return HeuristicResult(
-                value=float(distance),
+                value=float(min_distance),
                 computation_time=computation_time,
                 features_computed=True
             )
@@ -229,9 +232,92 @@ class Tier1Heuristic(BaseHeuristic):
         
         return mean_features
     
+    def _compute_d4_minimized_distance(self, current_grid: np.ndarray, 
+                                      target_features: np.ndarray) -> float:
+        """Compute minimum L₂ distance over all D₄ transformations.
+        
+        This implements h₁(G) = min_{ρ∈D₄} ||f̄_in - f̄_ρ(G)||₂
+        
+        Args:
+            current_grid: Current grid state
+            target_features: Target feature vector (fixed)
+            
+        Returns:
+            Minimum L₂ distance over all D₄ transformations
+        """
+        min_distance = float('inf')
+        
+        # Try all D₄ transformations of the current grid
+        for transform in self.d4_elements:
+            try:
+                # Check cache first for this transformation
+                grid_hash = hash(current_grid.tobytes())
+                cache_key = (grid_hash, transform)
+                
+                if cache_key in self.transformed_feature_cache:
+                    transformed_features = self.transformed_feature_cache[cache_key]
+                else:
+                    # Apply D₄ transformation to current grid
+                    if current_grid.shape[0] == current_grid.shape[1]:
+                        # Square grid - can use efficient symmetry transformation
+                        transformed_grid = self.symmetry_detector.apply_symmetry_transform(
+                            current_grid, transform
+                        )
+                    else:
+                        # Non-square grid - use numpy-based transformation
+                        transformed_grid = self._apply_numpy_transform(current_grid, transform)
+                    
+                    # Extract features from transformed grid
+                    transformed_features = self._extract_mean_features(transformed_grid)
+                    
+                    # Cache the result
+                    self.transformed_feature_cache[cache_key] = transformed_features
+                
+                # Compute L₂ distance
+                distance = np.linalg.norm(target_features - transformed_features)
+                min_distance = min(min_distance, distance)
+                
+            except Exception as e:
+                logger.debug(f"Failed to compute distance for transform {transform}: {e}")
+                continue
+        
+        return min_distance
+    
+    def _apply_numpy_transform(self, grid: np.ndarray, transform) -> np.ndarray:
+        """Apply D₄ transformation using numpy operations for non-square grids.
+        
+        Args:
+            grid: Input grid
+            transform: D₄ transformation to apply
+            
+        Returns:
+            Transformed grid
+        """
+        from arc_solver.perception.symmetry import SymmetryType
+        
+        if transform == SymmetryType.IDENTITY:
+            return grid.copy()
+        elif transform == SymmetryType.ROTATE_90:
+            return np.rot90(grid, k=-1)  # Clockwise 90°
+        elif transform == SymmetryType.ROTATE_180:
+            return np.rot90(grid, k=2)   # 180°
+        elif transform == SymmetryType.ROTATE_270:
+            return np.rot90(grid, k=1)   # Counter-clockwise 90° (= clockwise 270°)
+        elif transform == SymmetryType.REFLECT_H:
+            return np.fliplr(grid)       # Horizontal reflection
+        elif transform == SymmetryType.REFLECT_V:
+            return np.flipud(grid)       # Vertical reflection
+        elif transform == SymmetryType.REFLECT_D1:
+            return np.transpose(grid)    # Main diagonal reflection
+        elif transform == SymmetryType.REFLECT_D2:
+            return np.rot90(np.transpose(grid), k=2)  # Anti-diagonal reflection
+        else:
+            return grid.copy()
+    
     def clear_cache(self):
         """Clear the feature cache."""
         self.feature_cache.clear()
+        self.transformed_feature_cache.clear()
         logger.info("Tier 1 heuristic cache cleared")
 
 
@@ -383,6 +469,267 @@ class Tier2Heuristic(BaseHeuristic):
         )
         
         return area_diff + color_diff + pos_diff * 0.1
+
+
+class LearnedHeuristicWeights:
+    """Learned heuristic weights system for feature importance learning."""
+    
+    def __init__(self, feature_dim: int = 50):
+        """Initialize learned heuristic weights.
+        
+        Args:
+            feature_dim: Dimension of feature vectors
+        """
+        self.feature_dim = feature_dim
+        self.weights = np.ones(feature_dim, dtype=np.float32)  # Start with uniform weights
+        self.training_data = []  # Store (features, solution_length) pairs
+        self.is_trained = False
+        
+        logger.info(f"Learned heuristic weights initialized with {feature_dim}D features")
+    
+    def add_training_example(self, start_features: np.ndarray, 
+                           target_features: np.ndarray, 
+                           solution_length: int) -> None:
+        """Add a training example from a solved puzzle.
+        
+        Args:
+            start_features: Feature vector of starting grid
+            target_features: Feature vector of target grid
+            solution_length: Length of the solution program
+        """
+        if len(start_features) != self.feature_dim or len(target_features) != self.feature_dim:
+            logger.warning(f"Feature dimension mismatch: expected {self.feature_dim}, "
+                         f"got {len(start_features)}, {len(target_features)}")
+            return
+        
+        # Compute feature difference
+        feature_diff = np.abs(target_features - start_features)
+        
+        # Store training example
+        self.training_data.append((feature_diff, solution_length))
+        
+        logger.debug(f"Added training example: solution_length={solution_length}")
+    
+    def train_weights(self, regularization: float = 0.01) -> None:
+        """Train feature weights using linear regression.
+        
+        Args:
+            regularization: L2 regularization strength
+        """
+        if len(self.training_data) < 5:
+            logger.warning(f"Insufficient training data: {len(self.training_data)} examples")
+            return
+        
+        try:
+            # Prepare training data
+            X = np.array([example[0] for example in self.training_data])  # Feature differences
+            y = np.array([example[1] for example in self.training_data])  # Solution lengths
+            
+            # Add small epsilon to avoid division by zero
+            X = X + 1e-8
+            
+            # Use ridge regression (linear regression with L2 regularization)
+            # Solve: (X^T X + λI) w = X^T y
+            XtX = X.T @ X
+            Xty = X.T @ y
+            
+            # Add regularization
+            regularization_matrix = regularization * np.eye(self.feature_dim)
+            
+            # Solve for weights
+            try:
+                self.weights = np.linalg.solve(XtX + regularization_matrix, Xty)
+            except np.linalg.LinAlgError:
+                # Fallback to pseudo-inverse if matrix is singular
+                logger.warning("Using pseudo-inverse for weight computation")
+                self.weights = np.linalg.pinv(XtX + regularization_matrix) @ Xty
+            
+            # Ensure weights are positive (feature importance should be non-negative)
+            self.weights = np.maximum(self.weights, 0.1)
+            
+            # Normalize weights to prevent scaling issues
+            self.weights = self.weights / np.mean(self.weights)
+            
+            self.is_trained = True
+            
+            logger.info(f"Trained weights on {len(self.training_data)} examples")
+            logger.info(f"Weight statistics: min={np.min(self.weights):.3f}, "
+                       f"max={np.max(self.weights):.3f}, mean={np.mean(self.weights):.3f}")
+            
+        except Exception as e:
+            logger.error(f"Weight training failed: {e}")
+            # Keep uniform weights as fallback
+            self.weights = np.ones(self.feature_dim, dtype=np.float32)
+    
+    def compute_weighted_distance(self, features1: np.ndarray, 
+                                features2: np.ndarray) -> float:
+        """Compute weighted L₂ distance between feature vectors.
+        
+        Args:
+            features1: First feature vector
+            features2: Second feature vector
+            
+        Returns:
+            Weighted L₂ distance
+        """
+        if len(features1) != self.feature_dim or len(features2) != self.feature_dim:
+            # Fallback to unweighted distance
+            return float(np.linalg.norm(features1 - features2))
+        
+        # Compute weighted difference
+        diff = features1 - features2
+        weighted_diff = diff * self.weights
+        
+        return float(np.linalg.norm(weighted_diff))
+    
+    def get_feature_importance(self) -> np.ndarray:
+        """Get current feature importance weights.
+        
+        Returns:
+            Feature importance weights
+        """
+        return self.weights.copy()
+    
+    def save_weights(self, filepath: str) -> None:
+        """Save learned weights to file.
+        
+        Args:
+            filepath: Path to save weights
+        """
+        try:
+            np.save(filepath, {
+                'weights': self.weights,
+                'feature_dim': self.feature_dim,
+                'training_examples': len(self.training_data),
+                'is_trained': self.is_trained
+            })
+            logger.info(f"Saved learned weights to {filepath}")
+        except Exception as e:
+            logger.error(f"Failed to save weights: {e}")
+    
+    def load_weights(self, filepath: str) -> None:
+        """Load learned weights from file.
+        
+        Args:
+            filepath: Path to load weights from
+        """
+        try:
+            data = np.load(filepath, allow_pickle=True).item()
+            self.weights = data['weights']
+            self.feature_dim = data['feature_dim']
+            self.is_trained = data['is_trained']
+            
+            logger.info(f"Loaded learned weights from {filepath}")
+            logger.info(f"Feature dim: {self.feature_dim}, trained: {self.is_trained}")
+        except Exception as e:
+            logger.error(f"Failed to load weights: {e}")
+
+
+class DualHeuristic(BaseHeuristic):
+    """Dual heuristic system: admissible + learned guidance."""
+    
+    def __init__(self, max_computation_time: float = 0.0005):
+        """Initialize dual heuristic system.
+        
+        Args:
+            max_computation_time: Maximum computation time
+        """
+        super().__init__("Dual_Admissible_Learned", max_computation_time)
+        
+        # Initialize base admissible heuristic
+        self.admissible_heuristic = Tier1Heuristic(max_computation_time)
+        
+        # Initialize learned weights
+        self.learned_weights = LearnedHeuristicWeights()
+        
+        # Combination parameters
+        self.admissible_weight = 0.7  # Weight for admissible heuristic
+        self.learned_weight = 0.3     # Weight for learned heuristic
+        
+        logger.info("Dual heuristic system initialized")
+    
+    def compute(self, current_grid: np.ndarray, target_grid: np.ndarray,
+                program: Optional[DSLProgram] = None) -> HeuristicResult:
+        """Compute dual heuristic value.
+        
+        Combines admissible heuristic (for guarantees) with learned heuristic (for guidance).
+        """
+        start_time = time.perf_counter()
+        
+        try:
+            # Compute admissible heuristic
+            admissible_result = self.admissible_heuristic.compute(current_grid, target_grid, program)
+            
+            if not self.learned_weights.is_trained:
+                # If not trained, just use admissible heuristic
+                return admissible_result
+            
+            # Compute learned heuristic
+            current_features = self.admissible_heuristic._extract_mean_features(current_grid)
+            target_features = self.admissible_heuristic._extract_mean_features(target_grid)
+            
+            learned_distance = self.learned_weights.compute_weighted_distance(
+                current_features, target_features
+            )
+            
+            # Combine heuristics
+            combined_value = (
+                self.admissible_weight * admissible_result.value +
+                self.learned_weight * learned_distance
+            )
+            
+            computation_time = time.perf_counter() - start_time
+            
+            return HeuristicResult(
+                value=float(combined_value),
+                computation_time=computation_time,
+                features_computed=True
+            )
+            
+        except Exception as e:
+            computation_time = time.perf_counter() - start_time
+            raise RuntimeError(f"Dual heuristic computation failed: {e}")
+    
+    def add_training_example(self, start_grid: np.ndarray, target_grid: np.ndarray,
+                           solution_length: int) -> None:
+        """Add training example for learned weights.
+        
+        Args:
+            start_grid: Starting grid
+            target_grid: Target grid
+            solution_length: Length of solution program
+        """
+        try:
+            start_features = self.admissible_heuristic._extract_mean_features(start_grid)
+            target_features = self.admissible_heuristic._extract_mean_features(target_grid)
+            
+            self.learned_weights.add_training_example(
+                start_features, target_features, solution_length
+            )
+        except Exception as e:
+            logger.warning(f"Failed to add training example: {e}")
+    
+    def train_learned_weights(self) -> None:
+        """Train the learned weight component."""
+        self.learned_weights.train_weights()
+    
+    def set_combination_weights(self, admissible_weight: float, learned_weight: float) -> None:
+        """Set combination weights for dual heuristic.
+        
+        Args:
+            admissible_weight: Weight for admissible component
+            learned_weight: Weight for learned component
+        """
+        total = admissible_weight + learned_weight
+        self.admissible_weight = admissible_weight / total
+        self.learned_weight = learned_weight / total
+        
+        logger.info(f"Set combination weights: admissible={self.admissible_weight:.2f}, "
+                   f"learned={self.learned_weight:.2f}")
+    
+    def clear_cache(self):
+        """Clear all caches."""
+        self.admissible_heuristic.clear_cache()
 
 
 class HeuristicSystem:

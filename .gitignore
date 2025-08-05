@@ -79,4 +79,4 @@ Thumbs.db
 # Large datasets (exclude from repo)
 arc-prize-2025*/
 data/
-cache/
+cache/temp_arc/

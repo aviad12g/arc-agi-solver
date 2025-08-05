@@ -59,12 +59,13 @@ class ARCSolver:
         
         logger.info("ARC solver initialized successfully")
     
-    def solve_task(self, task, timeout: float = 30.0) -> Dict[str, Any]:
+    def solve_task(self, task, timeout: float = 30.0, use_multi_example: bool = True) -> Dict[str, Any]:
         """Solve a single ARC task.
         
         Args:
             task: ARC task object
             timeout: Timeout in seconds
+            use_multi_example: Whether to use multi-example validation
             
         Returns:
             Dictionary with solution results
@@ -73,17 +74,12 @@ class ARCSolver:
         
         try:
             with TimeoutHandler(timeout) as timeout_handler:
-                # For now, we'll implement a basic solver that tries to find
-                # a transformation from the first training example
                 if not task.train_examples:
                     return {
                         'success': False,
                         'error': 'No training examples provided',
                         'computation_time': time.perf_counter() - start_time
                     }
-                
-                # Use first training example
-                input_grid, output_grid = task.train_examples[0]
                 
                 # Check for timeout
                 if timeout_handler.timed_out:
@@ -93,8 +89,16 @@ class ARCSolver:
                         'computation_time': time.perf_counter() - start_time
                     }
                 
-                # Run A* search to find transformation
-                search_result = self.searcher.search(input_grid, output_grid)
+                # Choose search method based on configuration
+                if use_multi_example and len(task.train_examples) > 1:
+                    # Use multi-example search for better accuracy
+                    logger.info(f"Using multi-example search with {len(task.train_examples)} training examples")
+                    search_result = self.searcher.search_multi_example(task.train_examples)
+                else:
+                    # Fallback to single-example search
+                    logger.info("Using single-example search")
+                    input_grid, output_grid = task.train_examples[0]
+                    search_result = self.searcher.search(input_grid, output_grid)
                 
                 computation_time = time.perf_counter() - start_time
                 
@@ -112,27 +116,51 @@ class ARCSolver:
                             logger.warning(f"Failed to execute program on test input: {e}")
                             test_predictions.append(None)
                     
+                    # Include multi-example validation stats
+                    search_stats = {
+                        'nodes_expanded': search_result.nodes_expanded,
+                        'nodes_generated': search_result.nodes_generated,
+                        'max_depth_reached': search_result.max_depth_reached,
+                        'termination_reason': search_result.termination_reason
+                    }
+                    
+                    # Add multi-example specific stats if available
+                    if hasattr(search_result, 'candidates_generated'):
+                        search_stats.update({
+                            'candidates_generated': search_result.candidates_generated,
+                            'examples_validated': search_result.examples_validated,
+                            'validation_success_rate': search_result.validation_success_rate,
+                            'multi_example_used': use_multi_example and len(task.train_examples) > 1
+                        })
+                    
                     return {
                         'success': True,
                         'program': search_result.program.to_dict(),
                         'predictions': test_predictions,
-                        'search_stats': {
-                            'nodes_expanded': search_result.nodes_expanded,
-                            'nodes_generated': search_result.nodes_generated,
-                            'max_depth_reached': search_result.max_depth_reached,
-                            'termination_reason': search_result.termination_reason
-                        },
+                        'search_stats': search_stats,
                         'computation_time': computation_time
                     }
                 else:
+                    # Include multi-example validation stats
+                    search_stats = {
+                        'nodes_expanded': search_result.nodes_expanded,
+                        'nodes_generated': search_result.nodes_generated,
+                        'termination_reason': search_result.termination_reason
+                    }
+                    
+                    # Add multi-example specific stats if available
+                    if hasattr(search_result, 'candidates_generated'):
+                        search_stats.update({
+                            'candidates_generated': search_result.candidates_generated,
+                            'examples_validated': search_result.examples_validated,
+                            'validation_success_rate': search_result.validation_success_rate,
+                            'multi_example_used': use_multi_example and len(task.train_examples) > 1
+                        })
+                    
                     return {
                         'success': False,
                         'error': f'Search failed: {search_result.termination_reason}',
-                        'search_stats': {
-                            'nodes_expanded': search_result.nodes_expanded,
-                            'nodes_generated': search_result.nodes_generated,
-                            'termination_reason': search_result.termination_reason
-                        },
+                        'search_stats': search_stats,
                         'computation_time': computation_time
                     }
                     
@@ -195,7 +223,9 @@ def solve_command(args) -> int:
         # Solve task
         logger.info("Solving task...")
         start_time = time.perf_counter()
-        result = solver.solve_task(task, timeout=args.timeout)
+        # Enable multi-example validation by default (can be disabled via flag)
+        use_multi_example = not args.disable_multi_example
+        result = solver.solve_task(task, timeout=args.timeout, use_multi_example=use_multi_example)
         total_time = time.perf_counter() - start_time
         
         # Add metadata
@@ -224,6 +254,17 @@ def solve_command(args) -> int:
                 print(f"Search nodes expanded: {result['search_stats']['nodes_expanded']}")
             else:
                 print(f"Error: {result.get('error', 'Unknown error')}")
+            
+            # Multi-example validation metrics
+            search_stats = result.get('search_stats', {})
+            if search_stats.get('multi_example_used', False):
+                print(f"Multi-example validation: ENABLED")
+                print(f"Training examples validated: {search_stats.get('examples_validated', 0)}")
+                print(f"Candidates generated: {search_stats.get('candidates_generated', 0)}")
+                print(f"Validation success rate: {search_stats.get('validation_success_rate', 0.0):.1%}")
+            else:
+                print(f"Multi-example validation: DISABLED")
+            
             print(f"Computation time: {format_duration(result['computation_time'])}")
             print(f"Total time: {format_duration(total_time)}")
         
@@ -278,7 +319,9 @@ def batch_command(args) -> int:
             """Process a single task file."""
             try:
                 task = load_task_from_file(task_file)
-                result = solver.solve_task(task, timeout=args.timeout)
+                # Enable multi-example validation by default (can be disabled via flag)
+                use_multi_example = not args.disable_multi_example
+                result = solver.solve_task(task, timeout=args.timeout, use_multi_example=use_multi_example)
                 result['task_file'] = str(task_file)
                 return result
             except Exception as e:
