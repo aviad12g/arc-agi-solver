@@ -183,6 +183,7 @@ class DSLEngine:
             'Translate': ['dx', 'dy'],
             'Scale': ['factor'],
             'MapColors': ['perm'],
+            'MapColorsPermutation': ['perm_map'],
             'PaintIf': ['predicate', 'new_color'],
             'FloodFill': ['start_row', 'start_col', 'color'],
             'Overlay': ['pattern', 'position_row', 'position_col'],

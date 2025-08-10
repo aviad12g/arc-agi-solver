@@ -21,6 +21,9 @@ from arc_solver.reasoning.dsl_engine import DSLEngine
 from arc_solver.perception.blob_labeling import create_blob_labeler
 from arc_solver.perception.features import create_orbit_signature_computer
 from arc_solver.solver.formula_layer.solver import solve_with_templates
+from arc_solver.reasoning.smt_cegis import try_cegis_solve
+from arc_solver.reasoning.object_synthesis import synthesize_object_level_program
+from arc_solver.reasoning.ensemble import select_best_program
 
 from .utils import (
     load_task_from_file, save_results, find_task_files, format_duration,
@@ -49,7 +52,18 @@ class ARCSolver:
         # Initialize components
         self.cache_manager = create_cache_manager(self.config.get('system', {}).get('caching'))
         self.heuristic_system = create_heuristic_system()
-        self.dsl_engine = DSLEngine()
+            # Wire DSLEngine settings from config
+        try:
+            reasoning_cfg = self.config.get('reasoning', {})
+            dsl_cfg = reasoning_cfg.get('dsl_engine', {}) if isinstance(reasoning_cfg, dict) else {}
+            max_prog_len = int(dsl_cfg.get('max_program_length', 4))
+            max_exec_time = float(dsl_cfg.get('max_execution_time', 0.001))
+            adaptive_limits = True
+        except Exception:
+            max_prog_len = 4
+            max_exec_time = 0.001
+            adaptive_limits = True
+        self.dsl_engine = DSLEngine(max_program_length=max_prog_len, max_execution_time=max_exec_time, adaptive_length_limits=adaptive_limits)
 
         # Apply deterministic settings if enabled in config
         self._apply_determinism()
@@ -211,24 +225,41 @@ class ARCSolver:
                 except Exception:
                     pass
 
-                # Try Formula Layer first (exact templates)
+                # Try exact synthesis (CEGIS/SMT skeleton) and Formula/Object Layer; ensemble selection
                 try:
+                    candidates = []
+                    cegis_program = try_cegis_solve(
+                        train_examples,
+                        max_length=self.config.get('solver', {}).get('max_program_length', 4),
+                        dsl_engine=self.dsl_engine,
+                    )
+                    if cegis_program is not None:
+                        candidates.append(cegis_program)
+
                     template_program = solve_with_templates(train_examples, self.dsl_engine)
                     if template_program is not None:
-                        # Execute on test inputs and return early
+                        candidates.append(template_program)
+
+                    # Try object-level synthesis (D4 + Translate + MapColors)
+                    obj_program = synthesize_object_level_program(train_examples, self.dsl_engine)
+                    if obj_program is not None:
+                        candidates.append(obj_program)
+
+                    if candidates:
+                        best = select_best_program(self.dsl_engine, candidates, train_examples) or candidates[0]
                         test_predictions = []
                         for test_input in test_inputs:
-                            pred, _ = self.dsl_engine.execute_program(template_program, test_input)
+                            pred, _ = self.dsl_engine.execute_program(best, test_input)
                             test_predictions.append(pred.tolist())
                         return {
                             'success': True,
-                            'program': template_program.to_dict(),
+                            'program': best.to_dict(),
                             'predictions': test_predictions,
                             'search_stats': {
                                 'nodes_expanded': 0,
                                 'nodes_generated': 0,
-                                'max_depth_reached': len(template_program.operations),
-                                'termination_reason': 'formula_layer_solution'
+                                'max_depth_reached': len(best.operations),
+                                'termination_reason': 'pre_search_solution'
                             },
                             'computation_time': time.perf_counter() - start_time,
                             'task_id': getattr(task, 'task_id', None)
@@ -289,6 +320,33 @@ class ARCSolver:
                         'task_id': getattr(task, 'task_id', None)
                     }
                 else:
+                    # Fallback: try bidirectional meet-in-the-middle on failure/timeouts
+                    try:
+                        from arc_solver.search.bidirectional import meet_in_the_middle
+                        if use_multi_example and len(train_examples) > 0:
+                            primary_input, primary_target = train_examples[0]
+                        else:
+                            primary_input, primary_target = train_examples[0]
+                        mitm_prog = meet_in_the_middle(primary_input, primary_target, max_depth_half=2, dsl_engine=self.dsl_engine)
+                        if mitm_prog is not None:
+                            test_predictions = []
+                            for test_input in test_inputs:
+                                pred, _ = self.dsl_engine.execute_program(mitm_prog, test_input)
+                                test_predictions.append(pred.tolist())
+                            return {
+                                'success': True,
+                                'program': mitm_prog.to_dict(),
+                                'predictions': test_predictions,
+                                'search_stats': {
+                                    'nodes_expanded': search_result.nodes_expanded,
+                                    'nodes_generated': search_result.nodes_generated,
+                                    'termination_reason': 'mitm_fallback'
+                                },
+                                'computation_time': time.perf_counter() - start_time,
+                                'task_id': getattr(task, 'task_id', None)
+                            }
+                    except Exception:
+                        pass
                     # Include multi-example validation stats
                     search_stats = {
                         'nodes_expanded': search_result.nodes_expanded,
@@ -637,7 +695,8 @@ def test_command(args) -> int:
             
             # Test DSL engine
             try:
-                dsl_engine = DSLEngine()
+                # Use configured limits for DSLEngine in tests
+                dsl_engine = DSLEngine(max_program_length=5, max_execution_time=0.01, adaptive_length_limits=True)
                 test_grid = [[1, 2], [3, 4]]
                 # Test would need proper DSL operations
                 print("  OK DSL engine")

@@ -27,6 +27,7 @@ from arc_solver.perception.features import (
 )
 from arc_solver.perception.symmetry import BitboardSymmetryDetector, get_d4_group_elements
 from arc_solver.reasoning.dsl_engine import DSLProgram
+from arc_solver.reasoning.abstract_domains import compute_h_abs
 
 logger = logging.getLogger(__name__)
 
@@ -761,23 +762,59 @@ class DualHeuristic(BaseHeuristic):
 class HeuristicSystem:
     """Combined two-tier heuristic system."""
     
-    def __init__(self, use_tier2: bool = True, tier2_threshold: float = 5.0):
+    def __init__(
+        self,
+        use_tier2: bool = True,
+        tier2_threshold: float = 5.0,
+        # Gating parameters (conservative defaults preserve prior behavior)
+        max_blob_for_tier2: int = 10**9,
+        min_depth_for_tier2: int = 0,
+        max_tier2_calls: int = 10**9,
+        dedupe_pairs: bool = False,
+        use_greedy_fallback_when_large: bool = False,
+    ):
         """Initialize heuristic system.
         
         Args:
             use_tier2: Whether to use Tier 2 heuristic
             tier2_threshold: Threshold for switching to Tier 2
+            max_blob_for_tier2: Only allow Tier 2 when min(blob_count) <= this
+            min_depth_for_tier2: Only allow Tier 2 when current depth >= this
+            max_tier2_calls: Global per-instance budget for Tier 2 calls
+            dedupe_pairs: If True, avoid recomputing Tier 2 for identical (grid, target) pairs
+            use_greedy_fallback_when_large: If True and blob count too large, use greedy fallback
         """
         self.tier1 = Tier1Heuristic()
         self.tier2 = Tier2Heuristic() if use_tier2 else None
         self.tier2_threshold = tier2_threshold
         self.use_tier2 = use_tier2
-        
+
+        # Gating configuration
+        self.max_blob_for_tier2 = int(max_blob_for_tier2)
+        self.min_depth_for_tier2 = int(min_depth_for_tier2)
+        self.max_tier2_calls = int(max_tier2_calls)
+        self.dedupe_pairs = bool(dedupe_pairs)
+        self.use_greedy_fallback_when_large = bool(use_greedy_fallback_when_large)
+
         # Statistics
         self.tier1_calls = 0
         self.tier2_calls = 0
+
+        # Internal bookkeeping for gating
+        self._tier2_call_budget_used = 0
+        self._seen_pair_keys = set()  # optional dedupe on (current_hash, target_hash)
         
-        logger.info(f"Heuristic system initialized (tier2: {use_tier2})")
+        logger.info(
+            "Heuristic system initialized (tier2: %s, thr=%.2f, max_blob=%s, min_depth=%s, max_calls=%s, dedupe=%s)" 
+            % (
+                use_tier2,
+                tier2_threshold,
+                self.max_blob_for_tier2,
+                self.min_depth_for_tier2,
+                self.max_tier2_calls,
+                self.dedupe_pairs,
+            )
+        )
     
     def compute_heuristic(self, current_grid: np.ndarray, target_grid: np.ndarray,
                          program: Optional[DSLProgram] = None) -> HeuristicResult:
@@ -787,15 +824,92 @@ class HeuristicSystem:
         """
         # Always compute Tier 1
         tier1_result = self.tier1(current_grid, target_grid, program)
+        # Combine with abstract admissible lower bound via max (still admissible)
+        try:
+            h_abs = compute_h_abs(current_grid, target_grid)
+            if h_abs > tier1_result.value:
+                tier1_result = HeuristicResult(
+                    value=float(h_abs),
+                    computation_time=tier1_result.computation_time,
+                    features_computed=tier1_result.features_computed,
+                    error=tier1_result.error,
+                )
+        except Exception:
+            pass
         self.tier1_calls += 1
         
-        # Use Tier 2 if enabled and Tier 1 value is low (indicating we're close)
-        if (self.use_tier2 and self.tier2 and 
-            tier1_result.value < self.tier2_threshold and
-            tier1_result.features_computed):
-            
-            tier2_result = self.tier2(current_grid, target_grid, program)
+        # Decide if Tier 2 is allowed
+        allow_tier2 = (
+            self.use_tier2
+            and self.tier2 is not None
+            and tier1_result.features_computed
+            and tier1_result.value < self.tier2_threshold
+        )
+
+        # Depth gating (best-effort; ignore if program not provided)
+        if allow_tier2 and self.min_depth_for_tier2 > 0 and program is not None:
+            try:
+                prog_len = None
+                for attr in ("length", "num_operations", "depth"):
+                    if hasattr(program, attr):
+                        prog_len = int(getattr(program, attr))
+                        break
+                if prog_len is None and hasattr(program, "__len__"):
+                    prog_len = int(len(program))
+                if prog_len is not None and prog_len < self.min_depth_for_tier2:
+                    allow_tier2 = False
+            except Exception:
+                # If we cannot determine, do not restrict based on depth
+                pass
+
+        # Budget gating
+        if allow_tier2 and self._tier2_call_budget_used >= self.max_tier2_calls:
+            allow_tier2 = False
+
+        # Dedupe gating on identical grid pairs
+        pair_key = None
+        if allow_tier2 and self.dedupe_pairs:
+            try:
+                pair_key = (hash(current_grid.tobytes()), hash(target_grid.tobytes()))
+                if pair_key in self._seen_pair_keys:
+                    allow_tier2 = False
+            except Exception:
+                pass
+
+        # Blob-count gating and optional greedy fallback
+        greedy_fallback = False
+        if allow_tier2 and self.max_blob_for_tier2 < 10**9:
+            try:
+                curr_blobs, _ = self.tier1.blob_labeler.label_blobs(current_grid)
+                targ_blobs, _ = self.tier1.blob_labeler.label_blobs(target_grid)
+                if min(len(curr_blobs), len(targ_blobs)) > self.max_blob_for_tier2:
+                    if self.use_greedy_fallback_when_large:
+                        greedy_fallback = True
+                    else:
+                        allow_tier2 = False
+            except Exception:
+                # If labeling fails, be conservative and skip Tier2
+                allow_tier2 = False
+
+        if allow_tier2:
+            # Compute Tier 2 (or its greedy fallback)
+            if greedy_fallback:
+                try:
+                    value = self.tier2._compute_fallback_assignment(current_grid, target_grid)
+                    computation_time = 0.0  # best-effort; precise timing not critical here
+                    tier2_result = HeuristicResult(value=float(value), computation_time=computation_time)
+                except Exception as e:
+                    # If fallback fails, revert to Tier 1
+                    logger.debug(f"Tier2 greedy fallback failed: {e}")
+                    return tier1_result
+            else:
+                tier2_result = self.tier2(current_grid, target_grid, program)
+
+            # Update gating bookkeeping
+            self._tier2_call_budget_used += 1
             self.tier2_calls += 1
+            if pair_key is not None:
+                self._seen_pair_keys.add(pair_key)
             
             # Return the more accurate Tier 2 result
             return HeuristicResult(
@@ -830,15 +944,35 @@ class HeuristicSystem:
         logger.info("Heuristic system caches cleared")
 
 
-def create_heuristic_system(use_tier2: bool = True, 
-                           tier2_threshold: float = 5.0) -> HeuristicSystem:
+def create_heuristic_system(
+    use_tier2: bool = True,
+    tier2_threshold: float = 5.0,
+    max_blob_for_tier2: int = 10**9,
+    min_depth_for_tier2: int = 0,
+    max_tier2_calls: int = 10**9,
+    dedupe_pairs: bool = False,
+    use_greedy_fallback_when_large: bool = False,
+) -> HeuristicSystem:
     """Factory function to create heuristic system.
     
     Args:
         use_tier2: Whether to enable Tier 2 heuristic
         tier2_threshold: Threshold for Tier 2 activation
+        max_blob_for_tier2: Only allow Tier 2 when min(blob_count) <= this
+        min_depth_for_tier2: Only allow Tier 2 when depth >= this
+        max_tier2_calls: Per-instance budget for Tier 2 calls
+        dedupe_pairs: If True, avoid duplicate Tier 2 computations for same (grid, target) pair
+        use_greedy_fallback_when_large: If True, use greedy fallback when blob count is large
         
     Returns:
         Configured HeuristicSystem instance
     """
-    return HeuristicSystem(use_tier2=use_tier2, tier2_threshold=tier2_threshold)
+    return HeuristicSystem(
+        use_tier2=use_tier2,
+        tier2_threshold=tier2_threshold,
+        max_blob_for_tier2=max_blob_for_tier2,
+        min_depth_for_tier2=min_depth_for_tier2,
+        max_tier2_calls=max_tier2_calls,
+        dedupe_pairs=dedupe_pairs,
+        use_greedy_fallback_when_large=use_greedy_fallback_when_large,
+    )

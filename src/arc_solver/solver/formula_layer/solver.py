@@ -39,7 +39,8 @@ def solve_with_templates(
     """
     if not train_pairs:
         return None
-    engine = dsl_engine or DSLEngine()
+    # Honor global DSLEngine config if provided elsewhere
+    engine = dsl_engine or DSLEngine(max_program_length=5, max_execution_time=0.01, adaptive_length_limits=True)
 
     # Try simple D4 transforms (+ optional color rank mapping)
     prog = _template_d4_with_color_rank(train_pairs, engine)
@@ -48,6 +49,31 @@ def solve_with_templates(
 
     # Try centroid-translation of dominant shapes
     prog = _template_translate_matched_shapes(train_pairs, engine)
+    if prog is not None and _validate_on_all_examples(engine, prog, train_pairs):
+        return prog
+
+    # Try overlay after extraction (non-zero only)
+    prog = _template_extract_then_overlay(train_pairs, engine)
+    if prog is not None and _validate_on_all_examples(engine, prog, train_pairs):
+        return prog
+
+    # Try repeat along row/column
+    prog = _template_repeat_pattern(train_pairs, engine)
+    if prog is not None and _validate_on_all_examples(engine, prog, train_pairs):
+        return prog
+
+    # Try flood fill with a likely start
+    prog = _template_flood_fill(train_pairs, engine)
+    if prog is not None and _validate_on_all_examples(engine, prog, train_pairs):
+        return prog
+
+    # Try drawing a frame if outputs appear to have a uniform border
+    prog = _template_draw_frame(train_pairs, engine)
+    if prog is not None and _validate_on_all_examples(engine, prog, train_pairs):
+        return prog
+
+    # Try majority color fill when output is a constant grid
+    prog = _template_majority_fill(train_pairs, engine)
     if prog is not None and _validate_on_all_examples(engine, prog, train_pairs):
         return prog
 
@@ -160,6 +186,131 @@ def _template_translate_matched_shapes(
     dx, dy = deltas[0]
     # Program: Translate(dx, dy)
     return DSLProgram([DSLOperation("Translate", {"dx": dx, "dy": dy})])
+
+
+def _template_extract_then_overlay(
+    train_pairs: List[Tuple[np.ndarray, np.ndarray]], engine: DSLEngine
+) -> Optional[DSLProgram]:
+    # Heuristic: if output looks like a subregion of input placed elsewhere
+    try:
+        src0, dst0 = train_pairs[0]
+        # Find tight non-zero bbox in dst0
+        rows, cols = np.where(dst0 != 0)
+        if rows.size == 0:
+            return None
+        r0, r1 = rows.min(), rows.max()
+        c0, c1 = cols.min(), cols.max()
+        # Assume same bbox in src0 (rough)
+        r0s, r1s = r0, r1
+        c0s, c1s = c0, c1
+        prog = DSLProgram([
+            DSLOperation("Extract", {"r1": int(r0s), "r2": int(r1s), "c1": int(c0s), "c2": int(c1s)}),
+            # Overlay at top-left (can be improved)
+            DSLOperation("Overlay", {"pattern": dst0[r0:r1+1, c0:c1+1].astype(np.int32), "position_row": int(r0), "position_col": int(c0)}),
+        ])
+        return prog
+    except Exception:
+        return None
+
+
+def _template_repeat_pattern(
+    train_pairs: List[Tuple[np.ndarray, np.ndarray]], engine: DSLEngine
+) -> Optional[DSLProgram]:
+    try:
+        src0, dst0 = train_pairs[0]
+        # If dst has repeated rows/cols of a band from src
+        band = src0[0:1, :]
+        if band.shape[1] == dst0.shape[1] and dst0.shape[0] % 1 == 0:
+            return DSLProgram([DSLOperation("Repeat", {"pattern": band.astype(np.int32), "count": int(dst0.shape[0]), "direction": "vertical"})])
+        col = src0[:, 0:1]
+        if col.shape[0] == dst0.shape[0] and dst0.shape[1] % 1 == 0:
+            return DSLProgram([DSLOperation("Repeat", {"pattern": col.astype(np.int32), "count": int(dst0.shape[1]), "direction": "horizontal"})])
+        return None
+    except Exception:
+        return None
+
+
+def _template_flood_fill(
+    train_pairs: List[Tuple[np.ndarray, np.ndarray]], engine: DSLEngine
+) -> Optional[DSLProgram]:
+    try:
+        src0, dst0 = train_pairs[0]
+        # Find a cell whose color changed massively; try flood fill from center
+        center = (src0.shape[0] // 2, src0.shape[1] // 2)
+        new_color = int(np.bincount(dst0.flatten()).argmax())
+        return DSLProgram([DSLOperation("FloodFill", {"start_row": int(center[0]), "start_col": int(center[1]), "color": new_color})])
+    except Exception:
+        return None
+
+
+def _template_draw_frame(
+    train_pairs: List[Tuple[np.ndarray, np.ndarray]], engine: DSLEngine
+) -> Optional[DSLProgram]:
+    """Detect if outputs have a uniform 1px border; draw it.
+
+    - For each dst, check top/bottom rows and left/right columns are constant color
+      and identical across sides. If a single color c is consistent across pairs,
+      propose DrawFrame(color=c).
+    """
+    try:
+        colors: List[int] = []
+        for _, dst in train_pairs:
+            if dst.size == 0:
+                return None
+            h, w = dst.shape
+            top = int(dst[0, 0]) if w > 0 else 0
+            bottom = int(dst[h - 1, 0]) if w > 0 else 0
+            left = int(dst[0, 0]) if h > 0 else 0
+            right = int(dst[0, w - 1]) if h > 0 else 0
+            # Check uniformity on each border
+            if not (np.all(dst[0, :] == top) and np.all(dst[h - 1, :] == bottom)):
+                return None
+            if not (np.all(dst[:, 0] == left) and np.all(dst[:, w - 1] == right)):
+                return None
+            # Require the same color on all four sides
+            if not (top == bottom == left == right):
+                return None
+            colors.append(top)
+        # Consistent across pairs
+        if not colors or any(c != colors[0] for c in colors):
+            return None
+        c = int(colors[0])
+        return DSLProgram([DSLOperation("DrawFrame", {"color": c})])
+    except Exception:
+        return None
+
+
+def _template_majority_fill(
+    train_pairs: List[Tuple[np.ndarray, np.ndarray]], engine: DSLEngine
+) -> Optional[DSLProgram]:
+    """If every output is a single constant color, fill with that color.
+
+    We detect a single color c across all outputs (ignoring shape mismatches),
+    and return PaintIf with a predicate that always matches via FloodFill from (0,0)
+    to overwrite entire canvas. Simpler: use Overlay of a constant pattern.
+    """
+    try:
+        colors: List[int] = []
+        shapes: List[Tuple[int, int]] = []
+        for _, dst in train_pairs:
+            if dst.size == 0:
+                return None
+            uniq = np.unique(dst)
+            if len(uniq) != 1:
+                return None
+            colors.append(int(uniq[0]))
+            shapes.append(dst.shape)
+        if not colors or any(c != colors[0] for c in colors):
+            return None
+        color = int(colors[0])
+        # Build a constant pattern for first target shape and overlay at (0,0)
+        h, w = shapes[0]
+        pattern = np.full((h, w), color, dtype=np.int32)
+        return DSLProgram([
+            DSLOperation("Overlay", {"pattern": pattern, "position_row": 0, "position_col": 0})
+        ])
+    except Exception:
+        return None
 
 
 def _validate_on_all_examples(

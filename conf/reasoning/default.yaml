@@ -4,7 +4,7 @@
 # DSL Engine settings
 dsl_engine:
   max_program_length: 4  # K=4 maximum operations
-  max_execution_time: 0.001  # 1ms maximum per program
+  max_execution_time: 0.01  # 10ms maximum per program (temporarily increased for accuracy eval)
   validate_programs: true  # Enable program validation
   
 # DSL Primitives configuration

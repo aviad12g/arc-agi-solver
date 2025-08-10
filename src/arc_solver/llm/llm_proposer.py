@@ -61,7 +61,7 @@ class LLMProposer:
         """
         self.config = config or LLMConfig()
         self.prompt_template = create_arc_prompt_template()
-        self.dsl_engine = DSLEngine()
+        self.dsl_engine = DSLEngine(max_program_length=5, max_execution_time=0.01, adaptive_length_limits=True)
         
         # LLM model (lazy initialization)
         self._model = None

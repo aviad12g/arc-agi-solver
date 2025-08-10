@@ -339,7 +339,7 @@ class LLMIntegratedSearcher:
         # Initialize components
         self.astar_searcher = AStarSearcher()
         self.llm_proposer = None  # Lazy initialization
-        self.dsl_engine = DSLEngine()
+        self.dsl_engine = DSLEngine(max_program_length=5, max_execution_time=0.01, adaptive_length_limits=True)
         self.blob_labeler = create_blob_labeler(use_gpu=False)
         
         # Statistics

@@ -22,6 +22,15 @@ heuristics:
   # Two-tier heuristic system
   use_tier2: true  # Enable Tier 2 heuristic
   tier2_threshold: 5.0  # Threshold for Tier 2 activation
+
+  # Tier-2 gating (disabled by default to preserve behavior). Enable to reduce slow spikes.
+  gating:
+    enable: false
+    max_blob_for_tier2: 8         # Only allow Tier2 when min(blob_count) <= this
+    min_depth_for_tier2: 2        # Only allow Tier2 when current depth >= this
+    max_tier2_calls: 50           # Per-task budget for Tier2 calls
+    dedupe_pairs: true            # Skip duplicate (grid,target) pairs
+    use_greedy_fallback_when_large: true  # Use greedy assignment if blobs exceed max
   
   # Tier 1: L₂ spectral heuristic
   tier1:

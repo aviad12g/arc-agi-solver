@@ -1,0 +1,44 @@
+Eval path: /Users/mazalcohen/arc-agi-solver-2/data/arc/arc-agi_evaluation_challenges.json
+Total evaluation tasks: 400
+Progress: 10/400 | solved=0 | elapsed=107.4s
+Progress: 20/400 | solved=1 | elapsed=190.4s
+Progress: 30/400 | solved=2 | elapsed=266.3s
+Progress: 40/400 | solved=3 | elapsed=347.8s
+Progress: 50/400 | solved=3 | elapsed=445.9s
+Progress: 60/400 | solved=3 | elapsed=568.0s
+Progress: 70/400 | solved=4 | elapsed=656.5s
+Progress: 80/400 | solved=5 | elapsed=736.9s
+Progress: 90/400 | solved=5 | elapsed=837.0s
+Progress: 100/400 | solved=6 | elapsed=915.0s
+Progress: 110/400 | solved=8 | elapsed=988.4s
+Progress: 120/400 | solved=8 | elapsed=1095.1s
+Progress: 130/400 | solved=8 | elapsed=1191.6s
+Progress: 140/400 | solved=9 | elapsed=1279.3s
+Progress: 150/400 | solved=13 | elapsed=1319.7s
+Progress: 160/400 | solved=14 | elapsed=1395.5s
+Progress: 170/400 | solved=15 | elapsed=1471.8s
+Progress: 180/400 | solved=16 | elapsed=1567.6s
+Progress: 190/400 | solved=17 | elapsed=1654.1s
+Progress: 200/400 | solved=18 | elapsed=1753.2s
+Progress: 210/400 | solved=20 | elapsed=1839.3s
+Progress: 220/400 | solved=21 | elapsed=1911.8s
+Progress: 230/400 | solved=23 | elapsed=2002.7s
+Progress: 240/400 | solved=26 | elapsed=2088.2s
+Progress: 250/400 | solved=26 | elapsed=2178.7s
+Progress: 260/400 | solved=28 | elapsed=2261.2s
+Progress: 270/400 | solved=28 | elapsed=2368.0s
+Progress: 280/400 | solved=29 | elapsed=2460.8s
+Progress: 290/400 | solved=31 | elapsed=2540.6s
+Progress: 300/400 | solved=32 | elapsed=2631.7s
+Progress: 310/400 | solved=32 | elapsed=2747.6s
+Progress: 320/400 | solved=32 | elapsed=2835.9s
+Progress: 330/400 | solved=32 | elapsed=2943.6s
+Progress: 340/400 | solved=33 | elapsed=3041.2s
+Progress: 350/400 | solved=35 | elapsed=3105.4s
+Progress: 360/400 | solved=35 | elapsed=3213.8s
+Progress: 370/400 | solved=36 | elapsed=3291.8s
+Progress: 380/400 | solved=36 | elapsed=3405.7s
+Progress: 390/400 | solved=38 | elapsed=3472.4s
+Progress: 400/400 | solved=38 | elapsed=3554.0s
+Wrote submission to: /Users/mazalcohen/arc-agi-solver-2/submission.json
+Done in 3554.0s

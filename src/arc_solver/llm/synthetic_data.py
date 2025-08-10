@@ -45,7 +45,7 @@ class SyntheticDataGenerator:
         self.colors = colors or list(range(10))  # ARC uses colors 0-9
         self.max_program_length = max_program_length
         
-        self.dsl_engine = DSLEngine(max_program_length)
+        self.dsl_engine = DSLEngine(max_program_length=max_program_length, max_execution_time=0.01, adaptive_length_limits=True)
         self.blob_labeler = create_blob_labeler(use_gpu=False)
         
         # Task type generators

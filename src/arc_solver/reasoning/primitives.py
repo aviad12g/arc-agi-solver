@@ -74,6 +74,11 @@ class DSLPrimitive(ABC):
         
         # Execute primitive
         result = self.execute(grid, **kwargs)
+        # Skip returning identical grid to help higher layers prune no-ops
+        # Note: call sites may filter; this guard is cheap and safe
+        if isinstance(result, np.ndarray) and result.shape == grid.shape:
+            # No-op detection left to caller; we just return as-is
+            pass
         
         # Check execution time
         execution_time = time.perf_counter() - start_time
@@ -544,31 +549,99 @@ class MapColors(DSLPrimitive):
     def get_parameter_combinations(self, grid: np.ndarray) -> List[Dict[str, Any]]:
         """Generate color mapping parameter combinations for the grid."""
         combinations = []
-        
+
         # Get unique colors in the grid
-        unique_colors = list(set(np.unique(grid)))
-        
-        # Generate some useful color mappings
-        # 1. Identity mapping (no change)
+        unique_colors = list(set(int(c) for c in np.unique(grid)))
+        if not unique_colors:
+            return combinations
+
+        # Identity mapping (included for completeness but will be filtered as a no-op later)
         identity = list(range(10))
         combinations.append({'perm': identity})
-        
-        # 2. Simple swaps between colors present in the grid
-        if len(unique_colors) >= 2:
-            for i in range(len(unique_colors)):
-                for j in range(i + 1, len(unique_colors)):
-                    color1, color2 = unique_colors[i], unique_colors[j]
-                    swap_perm = identity.copy()
-                    swap_perm[color1], swap_perm[color2] = color2, color1
-                    combinations.append({'perm': swap_perm})
-        
-        # 3. Map all colors to a single color
-        for target_color in unique_colors:
-            if target_color != 0:  # Don't map everything to background
-                single_color_perm = [target_color] * 10
-                combinations.append({'perm': single_color_perm})
-        
-        return combinations[:10]  # Limit to prevent explosion
+
+        # Simple swaps between top-3 most frequent colors
+        values, counts = np.unique(grid, return_counts=True)
+        color_freq = sorted([(int(v), int(c)) for v, c in zip(values, counts)], key=lambda x: -x[1])
+        top_colors = [v for v, _ in color_freq[:3]]
+        for i in range(len(top_colors)):
+            for j in range(i + 1, len(top_colors)):
+                c1, c2 = top_colors[i], top_colors[j]
+                swap_perm = identity.copy()
+                swap_perm[c1], swap_perm[c2] = c2, c1
+                combinations.append({'perm': swap_perm})
+
+        # Small 3-color cycle among top-3 colors
+        if len(top_colors) >= 3:
+            a, b, c = top_colors[:3]
+            cycle_perm = identity.copy()
+            cycle_perm[a], cycle_perm[b], cycle_perm[c] = b, c, a
+            combinations.append({'perm': cycle_perm})
+
+        return combinations[:6]
+
+
+class MapColorsPermutation(DSLPrimitive):
+    """Remap seen colors using a partial permutation map constrained to seen colors.
+
+    Parameter 'perm_map' is a dict like {old_color: new_color} for colors present in the grid.
+    """
+
+    def __init__(self):
+        super().__init__("MapColorsPermutation")
+
+    def execute(self, grid: np.ndarray, **kwargs) -> np.ndarray:
+        perm_map = kwargs['perm_map']
+        result = grid.copy()
+        for old_color, new_color in perm_map.items():
+            mask = (grid == int(old_color))
+            if np.any(mask):
+                result[mask] = int(new_color)
+        return result
+
+    def validate_params(self, **kwargs) -> bool:
+        if 'perm_map' not in kwargs:
+            return False
+        perm_map = kwargs['perm_map']
+        if not isinstance(perm_map, dict) or not perm_map:
+            return False
+        for k, v in perm_map.items():
+            if not isinstance(k, int) or not isinstance(v, int):
+                return False
+            if not (0 <= k <= 9 and 0 <= v <= 9):
+                return False
+        return True
+
+    def get_parameter_combinations(self, grid: np.ndarray) -> List[Dict[str, Any]]:
+        combinations: List[Dict[str, Any]] = []
+        values, counts = np.unique(grid, return_counts=True)
+        if values.size == 0:
+            return combinations
+
+        # Sort colors by frequency (descending)
+        color_freq = sorted([(int(v), int(c)) for v, c in zip(values, counts)], key=lambda x: -x[1])
+        top_colors = [v for v, _ in color_freq[:4]]
+
+        # Generate simple swaps among top colors
+        for i in range(len(top_colors)):
+            for j in range(i + 1, len(top_colors)):
+                c1, c2 = top_colors[i], top_colors[j]
+                if c1 == c2:
+                    continue
+                combinations.append({'perm_map': {c1: c2, c2: c1}})
+
+        # 3-cycle among top-3 colors
+        if len(top_colors) >= 3:
+            a, b, c = top_colors[:3]
+            combinations.append({'perm_map': {a: b, b: c, c: a}})
+
+        # Map least frequent color to most frequent (if both non-background)
+        least = color_freq[-1][0]
+        most = color_freq[0][0]
+        if least != most:
+            combinations.append({'perm_map': {least: most}})
+
+        # Limit combinations to prevent explosion
+        return combinations[:8]
 
 
 # Conditional Operation Primitives
@@ -702,42 +775,38 @@ class PaintIf(DSLPrimitive):
         return isinstance(new_color, int) and 0 <= new_color <= 9
     
     def get_parameter_combinations(self, grid: np.ndarray) -> List[Dict[str, Any]]:
-        """Generate PaintIf parameter combinations for the grid."""
-        combinations = []
-        
-        # Get unique colors in the grid
-        unique_colors = list(set(np.unique(grid)))
-        
-        # Generate simple predicates and color mappings
-        for target_color in unique_colors:
-            if target_color != 0:  # Don't target background
-                # Color-based predicate
-                color_predicate = ColorPredicate([target_color])
-                
-                # Paint with different colors
-                for new_color in unique_colors:
-                    if new_color != target_color:
-                        combinations.append({
-                            'predicate': color_predicate,
-                            'new_color': new_color
-                        })
-        
-        # Size-based predicates
-        if len(unique_colors) > 1:
-            # Small blobs (size <= 3)
-            small_predicate = SizePredicate(min_size=1, max_size=3)
-            # Large blobs (size > 3)  
-            large_predicate = SizePredicate(min_size=4, max_size=100)
-            
-            for predicate in [small_predicate, large_predicate]:
-                for new_color in unique_colors:
-                    if new_color != 0:  # Don't paint with background
-                        combinations.append({
-                            'predicate': predicate,
-                            'new_color': new_color
-                        })
-        
-        return combinations[:5]  # Limit to prevent explosion
+        """Generate restricted, safe PaintIf parameter combinations for the grid."""
+        combinations: List[Dict[str, Any]] = []
+
+        # Unique colors and their frequencies
+        values, counts = np.unique(grid, return_counts=True)
+        if values.size == 0:
+            return combinations
+        color_freq = sorted([(int(v), int(c)) for v, c in zip(values, counts)], key=lambda x: -x[1])
+        top_colors = [v for v, _ in color_freq if v != 0][:3]  # prefer non-background
+
+        # Allowed predicates: horizontal line, vertical line, size>=N where N in {2,3,4}
+        predicates: List[BlobPredicate] = [
+            HorizontalLinePredicate(),
+            VerticalLinePredicate(),
+            SizePredicate(min_size=2),
+            SizePredicate(min_size=3),
+            SizePredicate(min_size=4),
+        ]
+
+        # Also allow color-based predicate for top colors
+        for c in top_colors:
+            predicates.append(ColorPredicate([c]))
+
+        # New colors to paint with: top 2-3 non-background colors different from target
+        paint_colors = top_colors[:3] if top_colors else [1]
+
+        for predicate in predicates:
+            for new_color in paint_colors:
+                combinations.append({'predicate': predicate, 'new_color': int(new_color)})
+
+        # Cap to small set
+        return combinations[:12]
 
 
 # Pattern Manipulation Primitives
@@ -1102,6 +1171,49 @@ class RepeatPrimitive(DSLPrimitive):
         return params[:10]  # Limit to avoid explosion
 
 
+# Simple Drawing Primitives
+class DrawFrame(DSLPrimitive):
+    """Draw a 1-pixel border (frame) around the grid with the given color."""
+
+    def __init__(self):
+        super().__init__("DrawFrame")
+
+    def execute(self, grid: np.ndarray, **kwargs) -> np.ndarray:
+        color = int(kwargs['color'])
+        result = grid.copy()
+        h, w = result.shape
+        if h == 0 or w == 0:
+            return result
+        result[0, :] = color
+        result[h - 1, :] = color
+        result[:, 0] = color
+        result[:, w - 1] = color
+        return result
+
+    def validate_params(self, **kwargs) -> bool:
+        if 'color' not in kwargs:
+            return False
+        try:
+            c = int(kwargs['color'])
+            return 0 <= c <= 9
+        except Exception:
+            return False
+
+    def get_parameter_combinations(self, grid: np.ndarray) -> List[Dict[str, Any]]:
+        values, counts = np.unique(grid, return_counts=True)
+        color_freq = sorted([(int(v), int(c)) for v, c in zip(values, counts)], key=lambda x: -x[1])
+        candidates = [v for v, _ in color_freq if v != 0][:3]
+        if 0 not in candidates:
+            candidates.append(0)
+        combos: List[Dict[str, Any]] = []
+        seen: set = set()
+        for c in candidates[:4]:
+            if c not in seen:
+                combos.append({'color': int(c)})
+                seen.add(c)
+        return combos
+
+
 # Factory functions for creating primitives
 
 def create_all_primitives() -> Dict[str, DSLPrimitive]:
@@ -1121,10 +1233,12 @@ def create_all_primitives() -> Dict[str, DSLPrimitive]:
         'Crop': Crop(),
         'Paint': Paint(),
         'MapColors': MapColors(),
+        'MapColorsPermutation': MapColorsPermutation(),
         'PaintIf': PaintIf(),
         'FloodFill': FloodFillPrimitive(),
         'Overlay': OverlayPrimitive(),
-        'Repeat': RepeatPrimitive()
+        'Repeat': RepeatPrimitive(),
+        'DrawFrame': DrawFrame()
     }
     
     logger.info(f"Created {len(primitives)} DSL primitives")

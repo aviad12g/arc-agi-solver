@@ -5,6 +5,7 @@ for finding optimal DSL programs that transform input grids to target grids.
 """
 
 import heapq
+import os
 import time
 import logging
 from typing import Optional, List, Dict, Set, Tuple, Any
@@ -15,6 +16,7 @@ from arc_solver.search.heuristics import HeuristicSystem, create_heuristic_syste
 from arc_solver.reasoning.dsl_engine import DSLEngine, DSLProgram, DSLOperation
 from arc_solver.core.data_models import GridState
 from arc_solver.caching import create_cache_manager
+from arc_solver.reasoning.version_space import compute_constraints
 
 logger = logging.getLogger(__name__)
 
@@ -224,8 +226,55 @@ class AStarSearcher:
             config: Search configuration parameters
         """
         self.config = config or SearchConfig()
-        self.heuristic_system = create_heuristic_system(use_tier2=True, tier2_threshold=5.0)
-        self.dsl_engine = DSLEngine()
+        # Initialize heuristic system with optional gating from config
+        try:
+            heur_cfg = {}
+            if hasattr(self.config, 'heuristics') and isinstance(self.config, SearchConfig):
+                # Best-effort access; in this codebase SearchConfig may not expose nested fields
+                heur_cfg = {}
+            # Pull YAML if available via create_cache_manager config path is out-of-scope here;
+            # rely on defaults and enable conservative gating inline below if env vars present
+            use_tier2 = True
+            tier2_threshold = 5.0
+            # Gating knobs via environment (optional) to avoid tight coupling
+            max_blob = int(os.environ.get('ARC_HEUR_T2_MAX_BLOB', '1000000000'))
+            min_depth = int(os.environ.get('ARC_HEUR_T2_MIN_DEPTH', '0'))
+            max_calls = int(os.environ.get('ARC_HEUR_T2_MAX_CALLS', '1000000000'))
+            dedupe = os.environ.get('ARC_HEUR_T2_DEDUPE', 'false').lower() == 'true'
+            greedy_large = os.environ.get('ARC_HEUR_T2_GREEDY_LARGE', 'false').lower() == 'true'
+        except Exception:
+            use_tier2 = True
+            tier2_threshold = 5.0
+            max_blob = 10**9
+            min_depth = 0
+            max_calls = 10**9
+            dedupe = False
+            greedy_large = False
+
+        self.heuristic_system = create_heuristic_system(
+            use_tier2=use_tier2,
+            tier2_threshold=tier2_threshold,
+            max_blob_for_tier2=max_blob,
+            min_depth_for_tier2=min_depth,
+            max_tier2_calls=max_calls,
+            dedupe_pairs=dedupe,
+            use_greedy_fallback_when_large=greedy_large,
+        )
+        # Ensure DSLEngine uses the configured execution cap (default to 10ms if not provided)
+        try:
+            from arc_solver.config import get_config as _get_cfg
+            cfg = _get_cfg()
+            if cfg is not None and 'reasoning' in cfg and 'dsl_engine' in cfg.reasoning:
+                dsl_cfg = cfg.reasoning.dsl_engine
+                max_exec_time = float(dsl_cfg.get('max_execution_time', 0.01))
+                max_prog_len = int(dsl_cfg.get('max_program_length', 4))
+            else:
+                max_exec_time = 0.01
+                max_prog_len = 4
+        except Exception:
+            max_exec_time = 0.01
+            max_prog_len = 4
+        self.dsl_engine = DSLEngine(max_program_length=max_prog_len, max_execution_time=max_exec_time, adaptive_length_limits=True)
         
         # Enhanced search statistics
         self.statistics = SearchStatistics()
@@ -786,6 +835,14 @@ class AStarSearcher:
                 depth=0
             )
             
+            # Compute version-space constraints from a single example when applicable
+            # (In single-example mode, use (initial_grid, target_grid) as the only pair.)
+            try:
+                vs_constraints = compute_constraints([(initial_grid, target_grid)])
+                allowed_ops = vs_constraints.get("allowed_op_names", set())
+            except Exception:
+                allowed_ops = set()
+
             # Priority queue for open nodes (min-heap)
             open_queue = [root_node]
             heapq.heapify(open_queue)
@@ -847,8 +904,14 @@ class AStarSearcher:
                 if current_node.heuristic < best_node.heuristic:
                     best_node = current_node
                 
-                # Expand node if within depth limit
+                # Expand node if within depth limit and not trivially infeasible
                 if current_node.depth < self.config.max_program_length:
+                    try:
+                        from arc_solver.reasoning.abstract_domains import is_infeasible
+                        if is_infeasible(current_node.grid, target_grid, self.config.max_program_length - current_node.depth):
+                            continue
+                    except Exception:
+                        pass
                     # Use parallel expansion if enabled
                     if self.config.parallel_expansion:
                         successors = self._expand_node_parallel(current_node, target_grid, deadline)
@@ -868,6 +931,15 @@ class AStarSearcher:
                             successor.grid_hash in closed_set):
                             self.statistics.duplicate_states += 1
                             continue
+
+                        # Version-space constraint: if inferred allowed set is non-empty,
+                        # filter successors whose next operation is not allowed.
+                        if allowed_ops:
+                            try:
+                                if successor.action and successor.action.primitive_name not in allowed_ops:
+                                    continue
+                            except Exception:
+                                pass
                         
                         heapq.heappush(open_queue, successor)
                 
@@ -932,11 +1004,40 @@ class AStarSearcher:
         
         # Get all available DSL operations
         available_operations = self.dsl_engine.get_available_operations(node.grid)
+
+        # Invariants from input vs target to prune ops:
+        # - If shapes match, avoid shape-changing ops
+        # - If color sets are identical across train pair (single-example), de-prioritize MapColors
+        shape_change_forbidden = True
+        try:
+            # Here, node holds only current grid; compare to target_grid
+            shape_change_forbidden = (node.grid.shape == target_grid.shape)
+        except Exception:
+            pass
+
+        # Enforce heavy-op budget: allow at most one heavy op per program
+        heavy_ops = {"PaintIf", "FloodFill", "Repeat"}
+        heavy_used = any(op.primitive_name in heavy_ops for op in node.program.operations)
         
         for operation in available_operations:
             if time.perf_counter() > deadline:
                 break
             try:
+                # Skip generating another heavy op if we've already used one
+                if heavy_used and operation.primitive_name in heavy_ops:
+                    continue
+                # Skip shape-changing ops if target shape equals current shape
+                if shape_change_forbidden and operation.primitive_name in {"Scale", "Extract", "Overlay"}:
+                    continue
+                # Cheap diff-driven gating for heavy ops
+                if operation.primitive_name in {"PaintIf", "FloodFill"}:
+                    try:
+                        # If no difference between current and target, skip heavy ops
+                        if np.array_equal(node.grid, target_grid):
+                            continue
+                    except Exception:
+                        pass
+
                 # Apply operation to get new grid
                 new_grid = self.dsl_engine.apply_operation(node.grid, operation)
                 
@@ -985,8 +1086,25 @@ class AStarSearcher:
         
         # Get all available DSL operations
         available_operations = self.dsl_engine.get_available_operations(node.grid)
+
+        # Enforce heavy-op budget for multi-example too
+        heavy_ops = {"PaintIf", "FloodFill", "Repeat"}
+        heavy_used = any(op.primitive_name in heavy_ops for op in node.program.operations)
+
+        # Version-space constraints (multi-example): infer allowed ops once
+        try:
+            from arc_solver.reasoning.version_space import compute_constraints
+            vs = compute_constraints(training_examples)
+            allowed_ops = vs.get("allowed_op_names", set())
+        except Exception:
+            allowed_ops = set()
         
         for operation in available_operations:
+            # Skip generating another heavy op if we've already used one
+            if heavy_used and operation.primitive_name in heavy_ops:
+                continue
+            if allowed_ops and operation.primitive_name not in allowed_ops:
+                continue
             try:
                 # Apply operation to get new grid
                 new_grid = self.dsl_engine.apply_operation(node.grid, operation)
@@ -1133,6 +1251,14 @@ class AStarSearcher:
         # Use first example as primary target for search
         primary_input, primary_target = training_examples[0]
         
+        # Bump K to 5 for multi-example searches only (keep single-example at default)
+        try:
+            self.dsl_engine.set_length_limit_for_mode('default', 5)
+            # Ensure internal config also respects this during this run
+            self.config.max_program_length = max(self.config.max_program_length, 5)
+        except Exception:
+            pass
+
         # Try enhanced multi-example search first
         enhanced_result = self._search_with_multi_example_nodes(training_examples)
         if enhanced_result.success:
@@ -1274,7 +1400,9 @@ class AStarSearcher:
                 
                 # Expand node if within depth limit
                 if current_node.depth < self.config.max_program_length:
-                    successors = self._expand_node(current_node, target_grid)
+                    successors = self._expand_node(
+                        current_node, target_grid, deadline=search_start + self.config.max_computation_time
+                    )
                     
                     for successor in successors:
                         if successor.grid_hash not in closed_set:
