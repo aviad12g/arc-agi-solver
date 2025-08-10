@@ -9,6 +9,7 @@ import time
 from typing import List, Dict, Any, Optional, Tuple
 from dataclasses import dataclass
 import numpy as np
+import itertools
 
 from arc_solver.llm.llm_proposer import LLMProposer, create_llm_proposer, ProposalResult
 from arc_solver.search.astar import AStarSearcher, SearchResult, SearchNode, SearchConfig
@@ -88,6 +89,8 @@ class LLMGuidedAStarSearcher:
         self.llm_proposals = llm_proposals
         self.priority_boost = priority_boost
         self.dsl_engine = dsl_engine
+        # Stable tie-break counter for heap ordering
+        self._counter = itertools.count()
         
         # Create set of LLM operations for fast lookup
         self.llm_operations = set()
@@ -98,7 +101,8 @@ class LLMGuidedAStarSearcher:
         logger.info(f"LLM-guided searcher initialized with {len(llm_proposals)} proposals, "
                    f"boost factor {priority_boost}")
     
-    def search(self, initial_grid: np.ndarray, target_grid: np.ndarray) -> SearchResult:
+    def search(self, initial_grid: np.ndarray, target_grid: np.ndarray,
+               train_pairs: Optional[List[Tuple[np.ndarray, np.ndarray]]] = None) -> SearchResult:
         """Perform LLM-guided A* search.
         
         Args:
@@ -123,21 +127,21 @@ class LLMGuidedAStarSearcher:
             )
         
         # Initialize search with LLM-guided priority queue
-        initial_heuristic = self.base_searcher.heuristic_system.compute_heuristic(
-            initial_grid, target_grid
-        )
+        initial_h_value = self._compute_h_global(initial_grid, train_pairs, target_grid)
         
         root_node = SearchNode(
             grid=initial_grid.copy(),
             program=DSLProgram([]),
             cost=0.0,
-            heuristic=initial_heuristic.value,
+            heuristic=initial_h_value,
             depth=0
         )
         
-        # Priority queue with LLM guidance
-        open_queue = [root_node]
-        heapq.heapify(open_queue)
+        # Priority queue with explicit tuple keys to preserve A* optimality
+        # Key ordering: (f_adm, -proposal_match, -learned_score, -train_consistency, depth, insertion_id)
+        open_queue: List[Tuple[Tuple[float, int, float, float, int, int], SearchNode]] = []
+        root_key = (root_node.cost + root_node.heuristic, 0, 0.0, 0.0, root_node.depth, next(self._counter))
+        heapq.heappush(open_queue, (root_key, root_node))
         
         # Closed set for duplicate detection
         closed_set = set()
@@ -160,7 +164,7 @@ class LLMGuidedAStarSearcher:
                 heapq.heapify(open_queue)
             
             # Get best node
-            current_node = heapq.heappop(open_queue)
+            _, current_node = heapq.heappop(open_queue)
             nodes_expanded += 1
             max_depth_reached = max(max_depth_reached, current_node.depth)
             
@@ -186,11 +190,15 @@ class LLMGuidedAStarSearcher:
             
             # Expand node if within depth limit
             if current_node.depth < self.base_searcher.config.max_program_length:
-                successors = self._expand_node_with_guidance(current_node, target_grid)
-                
-                for successor in successors:
+                guided_successors = self._expand_node_with_guidance(current_node, target_grid, train_pairs)
+                for successor, proposal_match in guided_successors:
                     if successor.grid_hash not in closed_set:
-                        heapq.heappush(open_queue, successor)
+                        f_adm = successor.cost + successor.heuristic
+                        # Compute tie-break features (ordering only)
+                        learned_score = 0.0  # Optional model hook
+                        train_consistency = self._compute_train_consistency(successor.program, train_pairs) if train_pairs else 0.0
+                        prio = (f_adm, -int(proposal_match), -learned_score, -train_consistency, successor.depth, next(self._counter))
+                        heapq.heappush(open_queue, (prio, successor))
                         nodes_generated += 1
         
         # Search completed without finding exact solution
@@ -215,7 +223,8 @@ class LLMGuidedAStarSearcher:
             termination_reason=termination_reason
         )
     
-    def _expand_node_with_guidance(self, node: SearchNode, target_grid: np.ndarray) -> List[SearchNode]:
+    def _expand_node_with_guidance(self, node: SearchNode, target_grid: np.ndarray,
+                                   train_pairs: Optional[List[Tuple[np.ndarray, np.ndarray]]]) -> List[Tuple[SearchNode, bool]]:
         """Expand node with LLM guidance priority boosting.
         
         Args:
@@ -225,7 +234,7 @@ class LLMGuidedAStarSearcher:
         Returns:
             List of successor nodes with adjusted priorities
         """
-        successors = []
+        successors: List[Tuple[SearchNode, bool]] = []
         
         # Get all available operations
         available_operations = self.dsl_engine.get_available_operations(node.grid)
@@ -242,59 +251,77 @@ class LLMGuidedAStarSearcher:
                 # Create new program
                 new_program = DSLProgram(node.program.operations + [operation])
                 
-                # Compute base heuristic
-                heuristic_result = self.base_searcher.heuristic_system.compute_heuristic(
-                    new_grid, target_grid
-                )
-                base_heuristic = heuristic_result.value
-                
-                # Apply LLM guidance boost
-                adjusted_heuristic = self._apply_llm_guidance(
-                    operation, base_heuristic, node.depth + 1
-                )
+                # Compute base heuristic (admissible). Do not alter this value.
+                base_heuristic = self._compute_h_global(new_grid, train_pairs, target_grid)
                 
                 # Create successor node
                 successor = SearchNode(
                     grid=new_grid,
                     program=new_program,
                     cost=node.cost + 1.0,
-                    heuristic=adjusted_heuristic,
+                    heuristic=base_heuristic,
                     parent=node,
                     action=operation,
                     depth=node.depth + 1
                 )
-                
-                successors.append(successor)
+                # Tie-break feature: whether this op matches any LLM-proposed op signature
+                op_signature = (operation.primitive_name, tuple(sorted(operation.parameters.items())))
+                proposal_match = op_signature in self.llm_operations
+                successors.append((successor, proposal_match))
                 
             except Exception as e:
                 logger.debug(f"Operation {operation} failed: {e}")
                 continue
         
         return successors
+
+    def _compute_h_global(self, grid: np.ndarray,
+                           train_pairs: Optional[List[Tuple[np.ndarray, np.ndarray]]],
+                           single_target: Optional[np.ndarray]) -> float:
+        """Compute multi-example admissible heuristic as max over examples.
+        Falls back to single target when train_pairs is None.
+        """
+        try:
+            if train_pairs and len(train_pairs) > 0:
+                values: List[float] = []
+                for _, target in train_pairs:
+                    hres = self.base_searcher.heuristic_system.compute_heuristic(grid, target)
+                    values.append(float(hres.value))
+                return max(values) if values else 0.0
+            # Single pair fallback
+            hres = self.base_searcher.heuristic_system.compute_heuristic(grid, single_target)
+            return float(hres.value)
+        except Exception:
+            # Be safe: no heuristic guidance if anything fails
+            return 0.0
+
+    def _compute_train_consistency(self, program: DSLProgram,
+                                   train_pairs: Optional[List[Tuple[np.ndarray, np.ndarray]]]) -> float:
+        """Compute tie-break consistency score over train pairs for a program.
+        Score = (#passed) - sum(error), where error is (1 - pixel_accuracy) for failed examples.
+        """
+        if not train_pairs:
+            return 0.0
+        passed = 0
+        error_sum = 0.0
+        for input_grid, expected in train_pairs:
+            try:
+                actual, _ = self.dsl_engine.execute_program(program, input_grid)
+                if np.array_equal(actual, expected):
+                    passed += 1
+                elif actual.shape == expected.shape:
+                    matches = float(np.sum(actual == expected))
+                    total = float(actual.size)
+                    err = 1.0 - (matches / max(total, 1.0))
+                    error_sum += err
+                else:
+                    error_sum += 1.0
+            except Exception:
+                error_sum += 1.0
+        return float(passed) - error_sum
     
     def _apply_llm_guidance(self, operation, base_heuristic: float, depth: int) -> float:
-        """Apply LLM guidance to adjust heuristic values.
-        
-        Args:
-            operation: DSL operation being considered
-            base_heuristic: Base heuristic value
-            depth: Current search depth
-            
-        Returns:
-            Adjusted heuristic value
-        """
-        # Create operation signature for lookup
-        op_signature = (operation.primitive_name, tuple(sorted(operation.parameters.items())))
-        
-        # Check if this operation is in LLM proposals
-        if op_signature in self.llm_operations:
-            # Apply priority boost (lower heuristic = higher priority)
-            boost_factor = self.priority_boost * (1.0 / (depth + 1))  # Decay with depth
-            adjusted_heuristic = base_heuristic / (1.0 + boost_factor)
-            
-            logger.debug(f"LLM boost applied to {operation}: {base_heuristic:.3f} -> {adjusted_heuristic:.3f}")
-            return adjusted_heuristic
-        
+        """Deprecated: Heuristic must remain admissible. Return base value unchanged."""
         return base_heuristic
 
 
@@ -566,7 +593,11 @@ class LLMIntegratedSearcher:
             
             # If we had no direct success but we do have proposals, still count as llm_used
             # Validate and filter proposals
-            valid_proposals = self._validate_proposals(proposal_result.proposals)
+            valid_proposals = self._validate_proposals(
+                proposal_result.proposals,
+                train_pairs=[(initial_grid, target_grid)]  # single-pair check first
+            )
+            # If multi-example data is available via external caller, we could pass it here
             if not valid_proposals:
                 # As a last resort, try common single-op transforms deterministically
                 for op_name in ["Rotate90", "Rotate180", "ReflectH", "ReflectV"]:
@@ -757,7 +788,8 @@ class LLMIntegratedSearcher:
         if self.llm_proposer is not None:
             self.llm_proposer.reset_stats()
     
-    def _validate_proposals(self, proposals: List[DSLProgram]) -> List[DSLProgram]:
+    def _validate_proposals(self, proposals: List[DSLProgram],
+                            train_pairs: Optional[List[Tuple[np.ndarray, np.ndarray]]] = None) -> List[DSLProgram]:
         """Validate LLM proposals for correctness and safety.
         
         Args:
@@ -786,6 +818,21 @@ class LLMIntegratedSearcher:
                     op_names = [op.primitive_name for op in proposal.operations]
                     if len(set(op_names)) < len(op_names) / 2:  # Too many duplicates
                         logger.debug(f"Proposal {i+1} has too many duplicate operations")
+                        continue
+                
+                # If train pairs provided, require passing all train examples
+                if train_pairs:
+                    all_pass = True
+                    for inp, out in train_pairs:
+                        try:
+                            pred, _ = self.dsl_engine.execute_program(proposal, inp)
+                            if not np.array_equal(pred, out):
+                                all_pass = False
+                                break
+                        except Exception:
+                            all_pass = False
+                            break
+                    if not all_pass:
                         continue
                 
                 valid_proposals.append(proposal)
