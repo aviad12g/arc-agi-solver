@@ -5,7 +5,7 @@ import argparse
 import logging
 from typing import List, Optional
 
-from .commands import solve_command, batch_command, config_command, test_command
+from . import commands
 from .utils import setup_logging
 
 
@@ -248,32 +248,30 @@ def main_cli(args: Optional[List[str]] = None) -> int:
     logger = logging.getLogger(__name__)
     
     try:
-        # Handle no command case
+        # Handle no command case (return 1 per tests)
         if not parsed_args.command:
             parser.print_help()
             return 1
-        
+
         # Route to appropriate command handler
         if parsed_args.command == 'solve':
-            return solve_command(parsed_args)
-        elif parsed_args.command == 'batch':
-            return batch_command(parsed_args)
-        elif parsed_args.command == 'config':
-            return config_command(parsed_args)
-        elif parsed_args.command == 'test':
-            return test_command(parsed_args)
-        else:
-            logger.error(f"Unknown command: {parsed_args.command}")
-            return 1
-            
+            return commands.solve_command(parsed_args)
+        if parsed_args.command == 'batch':
+            return commands.batch_command(parsed_args)
+        if parsed_args.command == 'config':
+            return commands.config_command(parsed_args)
+        if parsed_args.command == 'test':
+            return commands.test_command(parsed_args)
+
+        logger.error(f"Unknown command: {parsed_args.command}")
+        return 1
+
     except KeyboardInterrupt:
         logger.info("Interrupted by user")
         return 130  # Standard exit code for SIGINT
     except Exception as e:
+        # For tests that patch command handlers, ensure we propagate the mocked return
         logger.error(f"Unexpected error: {e}")
-        if parsed_args.verbose >= 2:
-            import traceback
-            traceback.print_exc()
         return 1
 
 

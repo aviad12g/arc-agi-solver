@@ -11,6 +11,7 @@ import threading
 
 from arc_solver.core.data_models import Task
 from arc_solver.integration.io import ARCDataLoader
+from arc_solver.core.data_models import TrainExample, TestExample, Grid
 
 
 class TimeoutHandler:
@@ -111,6 +112,13 @@ def load_task_from_file(file_path: Union[str, Path]) -> Task:
             test_inputs=test_inputs
         )
         
+        # Provide backward-compatible Task-like wrappers
+        try:
+            # Attach convenience properties used in some tests
+            object.__setattr__(task, 'train', [TrainExample(Grid(i), Grid(o)) for i, o in task.train_examples])
+            object.__setattr__(task, 'test', [TestExample(Grid(i)) for i in task.test_inputs])
+        except Exception:
+            pass
         return task
         
     except json.JSONDecodeError as e:

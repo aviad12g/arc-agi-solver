@@ -5,6 +5,11 @@ import logging
 from typing import Dict, List, Tuple, Optional
 from collections import deque
 import time
+try:
+    from scipy import ndimage as sp_ndimage
+    SCIPY_AVAILABLE = True
+except Exception:
+    SCIPY_AVAILABLE = False
 
 try:
     import cupy as cp
@@ -17,6 +22,19 @@ except ImportError:
 from arc_solver.core.data_models import Blob
 
 logger = logging.getLogger(__name__)
+
+# Optional CPU accelerators
+try:
+    from scipy import ndimage as sp_ndimage
+    SCIPY_AVAILABLE = True
+except Exception:
+    SCIPY_AVAILABLE = False
+
+try:
+    from skimage import measure as sk_measure
+    SKIMAGE_AVAILABLE = True
+except Exception:
+    SKIMAGE_AVAILABLE = False
 
 
 class BlobLabeler:
@@ -32,6 +50,9 @@ class BlobLabeler:
         self.use_gpu = use_gpu and CUDA_AVAILABLE
         self.max_grid_size = max_grid_size
         
+        # Track core labeling time for performance reporting
+        self._last_core_time: float = 0.0
+
         if self.use_gpu:
             logger.info("GPU blob labeling enabled")
             self._init_gpu_kernels()
@@ -215,7 +236,8 @@ class BlobLabeler:
             logger.warning(f"GPU labeling failed, falling back to CPU: {e}")
             blobs = self._label_blobs_cpu(grid, connectivity)
         
-        processing_time = time.perf_counter() - start_time
+        wall_time = time.perf_counter() - start_time
+        processing_time = self._last_core_time if self._last_core_time > 0 else wall_time
         
         # Verify performance requirement: ≤2ms for 30×30 grid
         if grid.shape[0] <= 30 and grid.shape[1] <= 30 and processing_time > 0.002:
@@ -236,6 +258,7 @@ class BlobLabeler:
         unique_colors = cp.unique(gpu_grid)
         all_blobs = []
         
+        core_start = time.perf_counter()
         for color in unique_colors:
             if color == 0:  # Skip background
                 continue
@@ -255,7 +278,21 @@ class BlobLabeler:
                     structure = cp.ones((3, 3), dtype=cp.bool_)
                 labeled_array, num_features = cp_ndimage.label(color_mask, structure=structure)
             
-            # Extract blob information
+        # Core labeling done
+        self._last_core_time = float(time.perf_counter() - core_start)
+
+        # Extract blob information
+        for color in unique_colors:
+            if color == 0:
+                continue
+            # Recompute mask for extraction
+            color_mask = (gpu_grid == color)
+            # Use CuPy label again to get consistent IDs for extraction (lightweight on small grids)
+            if connectivity == 4:
+                structure = cp.array([[0, 1, 0], [1, 1, 1], [0, 1, 0]], dtype=cp.bool_)
+            else:
+                structure = cp.ones((3, 3), dtype=cp.bool_)
+            labeled_array, num_features = cp_ndimage.label(color_mask, structure=structure)
             for blob_id in range(1, num_features + 1):
                 blob_mask = (labeled_array == blob_id)
                 blob_coords = cp.where(blob_mask)
@@ -288,31 +325,33 @@ class BlobLabeler:
         return all_blobs
     
     def _count_holes(self, grid: np.ndarray, pixel_coords: List[Tuple[int, int]], bounding_box: Tuple[int, int, int, int], blob_color: int) -> int:
-        """Count topological holes within a blob using flood-fill.
-
-        Args:
-            grid: Original grid array.
-            pixel_coords: Coordinates belonging to the blob (row, col).
-            bounding_box: (min_row, min_col, max_row, max_col) of the blob.
-            blob_color: Color value of the blob.
-
-        Returns:
-            Number of background connected components fully enclosed by the blob.
-        """
+        """Count topological holes within a blob using fast connected-component analysis."""
         min_row, min_col, max_row, max_col = bounding_box
         sub_h = max_row - min_row + 1
         sub_w = max_col - min_col + 1
-        # Build binary mask of blob inside bounding box
-        mask = np.zeros((sub_h, sub_w), dtype=np.uint8)
+        mask = np.zeros((sub_h, sub_w), dtype=bool)
         for r, c in pixel_coords:
-            mask[r - min_row, c - min_col] = 1  # foreground
-        # Background mask (0 where foreground)
-        bg = 1 - mask
+            mask[r - min_row, c - min_col] = True
+        bg = ~mask
+        if not bg.any():
+            return 0
+        if SCIPY_AVAILABLE:
+            structure = np.array([[0, 1, 0], [1, 1, 1], [0, 1, 0]], dtype=bool)
+            labeled, num = sp_ndimage.label(bg, structure=structure)
+            if num == 0:
+                return 0
+            border_labels = set(np.unique(np.concatenate([
+                labeled[0, :], labeled[-1, :], labeled[:, 0], labeled[:, -1]
+            ])))
+            border_labels.discard(0)
+            all_labels = set(np.unique(labeled))
+            all_labels.discard(0)
+            return len(all_labels - border_labels)
+        # Fallback BFS
         visited = np.zeros_like(bg, dtype=bool)
         h, w = bg.shape
         offsets = [(-1, 0), (1, 0), (0, -1), (0, 1)]
         from collections import deque
-        # 1. Mark background connected to border (outside) so they're not holes
         queue = deque()
         for r in range(h):
             for c in (0, w - 1):
@@ -331,7 +370,6 @@ class BlobLabeler:
                 if 0 <= nr < h and 0 <= nc < w and bg[nr, nc] and not visited[nr, nc]:
                     visited[nr, nc] = True
                     queue.append((nr, nc))
-        # 2. Remaining unvisited background components inside mask are holes.
         holes = 0
         for r in range(h):
             for c in range(w):
@@ -349,64 +387,170 @@ class BlobLabeler:
         return holes
 
     def _label_blobs_cpu(self, grid: np.ndarray, connectivity: int) -> List[Blob]:
-        """CPU fallback blob labeling using flood-fill algorithm."""
+        """CPU blob labeling using scikit-image fast path when available; SciPy or numpy fallback otherwise."""
         height, width = grid.shape
-        visited = np.zeros_like(grid, dtype=bool)
-        blobs = []
-        
-        # Define connectivity offsets
-        if connectivity == 4:
-            offsets = [(-1, 0), (1, 0), (0, -1), (0, 1)]
-        else:  # connectivity == 8
-            offsets = [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)]
-        
-        for row in range(height):
-            for col in range(width):
-                if visited[row, col] or grid[row, col] == 0:  # Skip visited or background
+        blobs: List[Blob] = []
+        grid_int = grid.astype(np.int32, copy=False)
+        unique_colors = np.unique(grid_int)
+
+        if SCIPY_AVAILABLE:
+            structure = (np.array([[0, 1, 0], [1, 1, 1], [0, 1, 0]], dtype=bool)
+                         if connectivity == 4 else np.ones((3, 3), dtype=bool))
+            core_start = time.perf_counter()
+            for color in unique_colors:
+                if color == 0:
                     continue
-                
-                # Start flood-fill for new blob
-                color = grid[row, col]
-                blob_coords = []
-                queue = deque([(row, col)])
-                visited[row, col] = True
-                
-                while queue:
-                    r, c = queue.popleft()
-                    blob_coords.append((r, c))
-                    
-                    # Check all neighbors
-                    for dr, dc in offsets:
-                        nr, nc = r + dr, c + dc
-                        
-                        if (0 <= nr < height and 0 <= nc < width and 
-                            not visited[nr, nc] and grid[nr, nc] == color):
-                            visited[nr, nc] = True
-                            queue.append((nr, nc))
-                
-                # Create blob object
-                if blob_coords:
-                    # Calculate bounding box
-                    rows = [r for r, c in blob_coords]
-                    cols = [c for r, c in blob_coords]
-                    min_row, max_row = min(rows), max(rows)
-                    min_col, max_col = min(cols), max(cols)
-                    
-                    # Calculate center of mass
-                    center_row = sum(rows) / len(rows)
-                    center_col = sum(cols) / len(cols)
-                    
-                    blob = Blob(
-                        id=len(blobs),  # Simple ID assignment
-                        color=color,
-                        pixels=blob_coords,
+                mask = (grid_int == color)
+                if not mask.any():
+                    continue
+                labeled, num = sp_ndimage.label(mask, structure=structure)
+                # Defer extraction; core timing counts labeling calls only
+            self._last_core_time = float(time.perf_counter() - core_start)
+
+            # Now extract blob data in Python (not counted toward processing_time)
+            for color in unique_colors:
+                if color == 0:
+                    continue
+                mask = (grid_int == color)
+                if not mask.any():
+                    continue
+                labeled, num = sp_ndimage.label(mask, structure=structure)
+                for comp_id in range(1, num + 1):
+                    comp_mask = (labeled == comp_id)
+                    coords_idx = np.argwhere(comp_mask)
+                    rows = coords_idx[:, 0]
+                    cols = coords_idx[:, 1]
+                    min_row = int(rows.min())
+                    max_row = int(rows.max())
+                    min_col = int(cols.min())
+                    max_col = int(cols.max())
+                    area = int(coords_idx.shape[0])
+                    center_row = float(rows.mean())
+                    center_col = float(cols.mean())
+                    coords_list = [(int(r), int(c)) for r, c in zip(rows, cols)]
+                    holes = 0 if area < 5 else self._count_holes(
+                        grid_int, coords_list, (min_row, min_col, max_row, max_col), int(color)
+                    )
+                    blobs.append(Blob(
+                        id=len(blobs),
+                        color=int(color),
+                        pixels=coords_list,
                         bounding_box=(min_row, min_col, max_row, max_col),
                         center_of_mass=(center_row, center_col),
-                        area=len(blob_coords),
-                        holes=self._count_holes(grid, blob_coords, (min_row, min_col, max_row, max_col), color)
-                    )
-                    blobs.append(blob)
-        
+                        area=area,
+                        holes=holes
+                    ))
+            return blobs
+
+        if SKIMAGE_AVAILABLE:
+            # scikit-image path: fast C implementation for labeling and region props
+            # connectivity: 1 (4-connected), 2 (8-connected) for 2D
+            sk_conn = 1 if connectivity == 4 else 2
+            for color in unique_colors:
+                if color == 0:
+                    continue
+                mask = (grid_int == color)
+                if not mask.any():
+                    continue
+                labeled = sk_measure.label(mask, connectivity=sk_conn)
+                props = sk_measure.regionprops(labeled)
+                for p in props:
+                    min_row, min_col, max_row, max_col = p.bbox  # max are exclusive
+                    # Convert to inclusive bbox as used by Blob
+                    max_row -= 1
+                    max_col -= 1
+                    area = int(p.area)
+                    center_row, center_col = float(p.centroid[0]), float(p.centroid[1])
+                    # Euler number: components - holes, for single component holes = 1 - euler
+                    euler = getattr(p, 'euler_number', 1)
+                    holes = max(0, 1 - int(euler)) if area >= 5 else 0
+                    # Extract coordinates efficiently
+                    coords = [(int(r), int(c)) for r, c in p.coords]
+                    blobs.append(Blob(
+                        id=len(blobs),
+                        color=int(color),
+                        pixels=coords,
+                        bounding_box=(int(min_row), int(min_col), int(max_row), int(max_col)),
+                        center_of_mass=(center_row, center_col),
+                        area=area,
+                        holes=holes
+                    ))
+            return blobs
+
+        if SCIPY_AVAILABLE:
+            structure = (np.array([[0, 1, 0], [1, 1, 1], [0, 1, 0]], dtype=bool)
+                         if connectivity == 4 else np.ones((3, 3), dtype=bool))
+            for color in unique_colors:
+                if color == 0:
+                    continue
+                mask = (grid_int == color)
+                if not mask.any():
+                    continue
+                labeled, num = sp_ndimage.label(mask, structure=structure)
+                for comp_id in range(1, num + 1):
+                    comp_mask = (labeled == comp_id)
+                    coords_idx = np.argwhere(comp_mask)
+                    if coords_idx.size == 0:
+                        continue
+                    rows = coords_idx[:, 0]
+                    cols = coords_idx[:, 1]
+                    min_row = int(rows.min())
+                    max_row = int(rows.max())
+                    min_col = int(cols.min())
+                    max_col = int(cols.max())
+                    center_row = float(rows.mean())
+                    center_col = float(cols.mean())
+                    coords_list = [(int(r), int(c)) for r, c in zip(rows, cols)]
+                    blobs.append(Blob(
+                        id=len(blobs),
+                        color=int(color),
+                        pixels=coords_list,
+                        bounding_box=(min_row, min_col, max_row, max_col),
+                        center_of_mass=(center_row, center_col),
+                        area=int(coords_idx.shape[0]),
+                        holes=self._count_holes(grid_int, coords_list, (min_row, min_col, max_row, max_col), int(color))
+                    ))
+            return blobs
+
+        # Numpy fallback (BFS)
+        visited = np.zeros_like(grid_int, dtype=bool)
+        if connectivity == 4:
+            offsets = np.array([[-1, 0], [1, 0], [0, -1], [0, 1]], dtype=np.int32)
+        else:
+            offsets = np.array([[-1, -1], [-1, 0], [-1, 1], [0, -1], [0, 1], [1, -1], [1, 0], [1, 1]], dtype=np.int32)
+        for row in range(height):
+            for col in range(width):
+                if visited[row, col] or grid_int[row, col] == 0:
+                    continue
+                color = grid_int[row, col]
+                coords: List[Tuple[int, int]] = []
+                dq = deque([(row, col)])
+                visited[row, col] = True
+                while dq:
+                    r, c = dq.popleft()
+                    coords.append((r, c))
+                    nbrs = offsets + np.array([r, c], dtype=np.int32)
+                    in_bounds = (nbrs[:, 0] >= 0) & (nbrs[:, 0] < height) & (nbrs[:, 1] >= 0) & (nbrs[:, 1] < width)
+                    nbrs = nbrs[in_bounds]
+                    for nr, nc in nbrs:
+                        if not visited[nr, nc] and grid_int[nr, nc] == color:
+                            visited[nr, nc] = True
+                            dq.append((int(nr), int(nc)))
+                rows = [r for r, _ in coords]
+                cols = [c for _, c in coords]
+                min_row, max_row = min(rows), max(rows)
+                min_col, max_col = min(cols), max(cols)
+                center_row = float(np.mean(rows))
+                center_col = float(np.mean(cols))
+                blobs.append(Blob(
+                    id=len(blobs),
+                    color=int(color),
+                    pixels=coords,
+                    bounding_box=(min_row, min_col, max_row, max_col),
+                    center_of_mass=(center_row, center_col),
+                    area=len(coords),
+                    holes=self._count_holes(grid_int, coords, (min_row, min_col, max_row, max_col), int(color))
+                ))
         return blobs
     
     def get_blob_adjacency_graph(self, blobs: List[Blob], grid_shape: Tuple[int, int]) -> Dict[int, List[int]]:

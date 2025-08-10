@@ -11,9 +11,38 @@ from dataclasses import dataclass
 import time
 import hashlib
 
-from .primitives import DSLPrimitive, create_all_primitives
+from .primitives import (
+    DSLPrimitive,
+    create_all_primitives,
+    BlobPredicate,
+    SizePredicate,
+    ColorPredicate,
+    HorizontalLinePredicate,
+    VerticalLinePredicate,
+)
 
 logger = logging.getLogger(__name__)
+
+
+# EBNF grammar for the DSL (documentation and simple validation guidance)
+# Program       := Operation ("->" Operation)*
+# Operation     := Identifier ["(" ArgList ")"]
+# ArgList       := Arg ("," Arg)*
+# Arg           := Identifier "=" Value | Value
+# Value         := Int | List
+# List          := "[" (Int ("," Int)*)? "]"
+# Identifier    := /[A-Za-z_][A-Za-z0-9_]*/
+# Int           := /-?[0-9]+/
+DSL_EBNF: str = (
+    "Program := Operation ('->' Operation)*\n"
+    "Operation := Identifier ['(' ArgList ')']\n"
+    "ArgList := Arg (',' Arg)*\n"
+    "Arg := Identifier '=' Value | Value\n"
+    "Value := Int | List\n"
+    "List := '[' (Int (',' Int)*)? ']'\n"
+    "Identifier := /[A-Za-z_][A-Za-z0-9_]*/\n"
+    "Int := /-?[0-9]+/\n"
+)
 
 
 @dataclass
@@ -146,6 +175,19 @@ class DSLEngine:
         
         # Load all primitives
         self.primitives = create_all_primitives()
+        # Canonical positional parameter order per primitive for parsing convenience
+        self.primitive_param_orders: Dict[str, List[str]] = {
+            'Paint': ['x', 'y', 'c'],
+            'Crop': ['r1', 'r2', 'c1', 'c2'],
+            'Extract': ['r1', 'r2', 'c1', 'c2'],
+            'Translate': ['dx', 'dy'],
+            'Scale': ['factor'],
+            'MapColors': ['perm'],
+            'PaintIf': ['predicate', 'new_color'],
+            'FloodFill': ['start_row', 'start_col', 'color'],
+            'Overlay': ['pattern', 'position_row', 'position_col'],
+            'Repeat': ['pattern', 'count', 'direction'],
+        }
         
         # Execution statistics
         self.execution_count = 0
@@ -277,6 +319,7 @@ class DSLEngine:
         for primitive_name, primitive in self.primitives.items():
             try:
                 # Get parameter combinations for this primitive and grid
+                # Tighten parameter generator by simple shape/color constraints when available
                 param_combinations = primitive.get_parameter_combinations(grid)
                 
                 for params in param_combinations:
@@ -284,7 +327,9 @@ class DSLEngine:
                         # Validate parameters before creating operation
                         if primitive.validate_params(**params):
                             operation = DSLOperation(primitive_name, params)
-                            operations.append(operation)
+                            # Pre-check applicability to current grid to prune no-ops
+                            if self.is_operation_applicable(grid, operation):
+                                operations.append(operation)
                         else:
                             logger.debug(f"Invalid parameters for {primitive_name}: {params}")
                     except Exception as e:
@@ -296,6 +341,249 @@ class DSLEngine:
                 continue
         
         return operations
+
+    def is_operation_applicable(self, grid: np.ndarray, operation: DSLOperation) -> bool:
+        """Cheap pre-check to avoid generating operations that cannot apply or are no-ops.
+
+        This does not execute the operation, but rules out obviously invalid cases.
+        """
+        name = operation.primitive_name
+        params = operation.parameters
+        height, width = grid.shape
+
+        # Parameterless geometric ops are always applicable
+        if name in {'Rotate90', 'Rotate180', 'ReflectH', 'ReflectV'}:
+            return True
+
+        if name == 'Paint':
+            x = params.get('x'); y = params.get('y'); c = params.get('c')
+            if not (isinstance(x, int) and isinstance(y, int) and isinstance(c, int)):
+                return False
+            if not (0 <= x < height and 0 <= y < width):
+                return False
+            # Avoid painting same color
+            return int(grid[x, y]) != int(c)
+
+        if name in {'Crop', 'Extract'}:
+            r1 = params.get('r1'); r2 = params.get('r2'); c1 = params.get('c1'); c2 = params.get('c2')
+            if not all(isinstance(v, int) for v in [r1, r2, c1, c2]):
+                return False
+            if r1 > r2 or c1 > c2:
+                return False
+            # Require non-empty region intersection with grid
+            if r1 > height - 1 or c1 > width - 1:
+                return False
+            if r2 < 0 or c2 < 0:
+                return False
+            return True
+
+        if name == 'Translate':
+            dx = params.get('dx'); dy = params.get('dy')
+            if not (isinstance(dx, int) and isinstance(dy, int)):
+                return False
+            # At least one original cell must remain in bounds after shift
+            # Equivalent to: abs(dx) < height or abs(dy) < width is necessary but not sufficient; stricter check:
+            return not (dx >= height or dx <= -height or dy >= width or dy <= -width)
+
+        if name == 'Scale':
+            factor = params.get('factor')
+            if not isinstance(factor, int) or factor < 1:
+                return False
+            # Avoid exceeding a practical limit (match engine assumptions up to 30)
+            return max(height, width) * factor <= 30
+
+        if name == 'MapColors':
+            perm = params.get('perm')
+            return isinstance(perm, (list, tuple)) and len(perm) == 10
+
+        # For other ops, defer to primitive validation only
+        return True
+
+    # ---------- Grammar parsing utilities ----------
+    def parse_dsl_program(self, text: str) -> DSLProgram:
+        """Parse a DSL program from text using the documented grammar.
+
+        Supports positional args for common primitives based on canonical parameter order.
+        """
+        if not isinstance(text, str) or not text.strip():
+            return DSLProgram([])
+
+        parts = [p.strip() for p in text.split('->') if p.strip()]
+        operations: List[DSLOperation] = []
+
+        for part in parts:
+            # Parse operation name and optional arg list
+            if '(' in part:
+                name = part[:part.index('(')].strip()
+                args_str = part[part.index('(')+1: part.rindex(')')].strip()
+                params = self._parse_args(name, args_str)
+            else:
+                name = part.strip()
+                params = {}
+
+            # Validate primitive exists
+            if name not in self.primitives:
+                raise ValueError(f"Unknown primitive in program: {name}")
+            # Validate params
+            primitive = self.primitives[name]
+            # Coerce special parameters (e.g., predicate literals)
+            params = self._coerce_special_params(name, params)
+            if not primitive.validate_params(**params):
+                raise ValueError(f"Invalid parameters for {name}: {params}")
+            operations.append(DSLOperation(name, params))
+
+        return DSLProgram(operations, self.max_program_length)
+
+    def validate_program_text(self, text: str) -> Tuple[bool, Optional[str]]:
+        """Validate a program string against grammar and primitives."""
+        try:
+            _ = self.parse_dsl_program(text)
+            return True, None
+        except Exception as e:
+            return False, str(e)
+
+    def _parse_args(self, primitive_name: str, args_str: str) -> Dict[str, Any]:
+        """Parse argument list into a parameter dict.
+
+        Supports:
+        - name=value pairs (e.g., x=1)
+        - positional ints mapped by canonical order
+        - list literals like [0,1,2,...] for MapColors
+        """
+        if not args_str:
+            return {}
+        # Tokenize top-level by commas, respecting parentheses/brackets
+        tokens = self._split_top_level_args(args_str)
+        params: Dict[str, Any] = {}
+
+        # Check if tokens are unnamed; if so, map by order
+        has_equals = any(('=' in t) and ('>=' not in t) and ('<=' not in t) for t in tokens)
+        if not has_equals:
+            order = self.primitive_param_orders.get(primitive_name, [])
+            values: List[Any] = [self._parse_value(t) for t in tokens]
+            if order and len(values) <= len(order):
+                for k, v in zip(order, values):
+                    params[k] = v
+                return params
+            # If order unknown or mismatch, fall back to empty (let validate fail if needed)
+            return params
+
+        # Handle named arguments
+        for tok in tokens:
+            if ('=' not in tok) or ('>=' in tok) or ('<=' in tok):
+                # Ignore unexpected positional when mixed
+                continue
+            k, v = tok.split('=', 1)
+            params[k.strip()] = self._parse_value(v.strip())
+        return params
+
+    def _split_top_level_args(self, s: str) -> List[str]:
+        args: List[str] = []
+        buf: List[str] = []
+        depth_paren = 0
+        depth_bracket = 0
+        for ch in s:
+            if ch == '(':
+                depth_paren += 1
+                buf.append(ch)
+                continue
+            if ch == ')':
+                depth_paren = max(0, depth_paren - 1)
+                buf.append(ch)
+                continue
+            if ch == '[':
+                depth_bracket += 1
+                buf.append(ch)
+                continue
+            if ch == ']':
+                depth_bracket = max(0, depth_bracket - 1)
+                buf.append(ch)
+                continue
+            if ch == ',' and depth_paren == 0 and depth_bracket == 0:
+                token = ''.join(buf).strip()
+                if token:
+                    args.append(token)
+                buf = []
+            else:
+                buf.append(ch)
+        last = ''.join(buf).strip()
+        if last:
+            args.append(last)
+        return args
+
+    def _parse_value(self, literal: str) -> Any:
+        # Predicate shorthand
+        pred = self._try_parse_predicate(literal)
+        if pred is not None:
+            return pred
+        # List of ints
+        if literal.startswith('[') and literal.endswith(']'):
+            inner = literal[1:-1].strip()
+            if not inner:
+                return []
+            return [int(x.strip()) for x in inner.split(',') if x.strip()]
+        # Int
+        try:
+            return int(literal)
+        except Exception:
+            # Fallback: raw string (for directions etc.)
+            return literal
+
+    def _coerce_special_params(self, primitive_name: str, params: Dict[str, Any]) -> Dict[str, Any]:
+        if primitive_name == 'PaintIf' and 'predicate' in params and not isinstance(params['predicate'], BlobPredicate):
+            parsed = self._try_parse_predicate(str(params['predicate']))
+            if parsed is not None:
+                params = dict(params)
+                params['predicate'] = parsed
+        return params
+
+    def _try_parse_predicate(self, literal: str) -> Optional[BlobPredicate]:
+        if not isinstance(literal, str):
+            return None
+        s = literal.strip()
+        if not s:
+            return None
+        # Horizontal/Vertical line
+        if s.lower() in {"is_horizontal_line", "horizontal_line", "hline"}:
+            return HorizontalLinePredicate()
+        if s.lower() in {"is_vertical_line", "vertical_line", "vline"}:
+            return VerticalLinePredicate()
+        # Size constraints
+        # Forms: size>=N, size<=N, size(min=...,max=...)
+        if s.lower().startswith("size") or s.lower().startswith("size>=") or s.lower().startswith("size<="):
+            try:
+                if ">=" in s:
+                    n = int(s.split(">=", 1)[1])
+                    return SizePredicate(min_size=n)
+                if "<=" in s:
+                    n = int(s.split("<=", 1)[1])
+                    return SizePredicate(max_size=n)
+                if s.startswith("size(") and s.endswith(")"):
+                    inner = s[s.index("(")+1:-1]
+                    parts = [p.strip() for p in inner.split(',') if p.strip()]
+                    kv = {}
+                    for p in parts:
+                        if '=' in p:
+                            k, v = p.split('=', 1)
+                            kv[k.strip()] = int(v.strip())
+                    return SizePredicate(min_size=kv.get('min', 0), max_size=kv.get('max', float('inf')))
+            except Exception:
+                return None
+        # Color predicate
+        # Forms: color(1,3), color=[1,3]
+        if s.lower().startswith("color"):
+            try:
+                if s.startswith("color(") and s.endswith(")"):
+                    inner = s[s.index("(")+1:-1]
+                    vals = [int(x.strip()) for x in inner.split(',') if x.strip()]
+                    return ColorPredicate(target_colors=vals)
+                if s.startswith("color=") and s.endswith("]") and "[" in s:
+                    inner = s[s.index("[")+1:-1]
+                    vals = [int(x.strip()) for x in inner.split(',') if x.strip()]
+                    return ColorPredicate(target_colors=vals)
+            except Exception:
+                return None
+        return None
     
     def apply_operation(self, grid: np.ndarray, operation: DSLOperation) -> np.ndarray:
         """Apply a single DSL operation to a grid.
@@ -307,12 +595,10 @@ class DSLEngine:
         Returns:
             Transformed grid
         """
-        if operation.primitive_name not in self.primitives:
-            raise ValueError(f"Unknown primitive: {operation.primitive_name}")
-        
-        primitive = self.primitives[operation.primitive_name]
-        
         try:
+            if operation.primitive_name not in self.primitives:
+                raise ValueError(f"Unknown primitive: {operation.primitive_name}")
+            primitive = self.primitives[operation.primitive_name]
             return primitive(grid, **operation.parameters)
         except Exception as e:
             logger.warning(f"Failed to apply operation {operation}: {e}")

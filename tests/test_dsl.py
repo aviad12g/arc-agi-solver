@@ -556,3 +556,59 @@ class TestDSLIntegration:
         # Verify no duplicates
         program_hashes = [hash(p) for p in programs]
         assert len(program_hashes) == len(set(program_hashes))
+
+
+class TestDSLGrammar:
+    """Tests for DSL grammar parsing and validation."""
+
+    def test_parse_dsl_program_simple(self):
+        engine = create_dsl_engine()
+        prog = engine.parse_dsl_program("Rotate90 -> ReflectH")
+        assert isinstance(prog, DSLProgram)
+        assert len(prog.operations) == 2
+        assert prog.operations[0].primitive_name == "Rotate90"
+        assert prog.operations[1].primitive_name == "ReflectH"
+
+    def test_parse_with_named_args(self):
+        engine = create_dsl_engine()
+        prog = engine.parse_dsl_program("Paint(x=1, y=2, c=3)")
+        assert len(prog.operations) == 1
+        op = prog.operations[0]
+        assert op.primitive_name == "Paint"
+        assert op.parameters == {"x": 1, "y": 2, "c": 3}
+
+    def test_parse_with_positional_args(self):
+        engine = create_dsl_engine()
+        prog = engine.parse_dsl_program("Paint(1, 2, 3)")
+        op = prog.operations[0]
+        assert op.parameters == {"x": 1, "y": 2, "c": 3}
+
+    def test_parse_mapcolors_list_literal(self):
+        engine = create_dsl_engine()
+        perm = list(range(10))
+        text = "MapColors([%s])" % ", ".join(str(x) for x in perm)
+        prog = engine.parse_dsl_program(text)
+        op = prog.operations[0]
+        assert op.parameters["perm"] == perm
+
+    def test_validate_program_text(self):
+        engine = create_dsl_engine()
+        ok, err = engine.validate_program_text("Rotate90 -> ReflectV")
+        assert ok and err is None
+
+        ok, err = engine.validate_program_text("Unknown()")
+        assert not ok and err is not None
+
+    def test_predicate_shorthand(self):
+        engine = create_dsl_engine()
+        # Size predicate
+        prog = engine.parse_dsl_program("PaintIf(size>=3, 9)")
+        op = prog.operations[0]
+        assert op.primitive_name == "PaintIf"
+        assert hasattr(op.parameters["predicate"], "evaluate")
+        
+        # Color predicate list
+        prog2 = engine.parse_dsl_program("PaintIf(color(1,3), 5)")
+        op2 = prog2.operations[0]
+        assert op2.primitive_name == "PaintIf"
+        assert hasattr(op2.parameters["predicate"], "evaluate")

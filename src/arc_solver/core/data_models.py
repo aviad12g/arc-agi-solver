@@ -1,7 +1,7 @@
 """Core data models for the ARC solver."""
 
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Any
 import numpy as np
 import hashlib
 
@@ -127,6 +127,9 @@ class Task:
     
     def __post_init__(self) -> None:
         """Validate task structure."""
+        # Normalize potential wrapper types (Grid, TrainExample/TestExample) into numpy arrays
+        self._normalize_examples()
+
         assert len(self.train_examples) > 0, "Task must have at least one training example"
         assert len(self.test_inputs) > 0, "Task must have at least one test input"
         
@@ -141,9 +144,87 @@ class Task:
             assert test_input.ndim == 2, f"Test input {i} must be 2D"
             assert test_input.dtype == np.int32, f"Test input {i} must be int32"
 
+    def _normalize_examples(self) -> None:
+        """Accept wrapper dataclasses (Grid, TrainExample/TestExample) and convert to ndarray tuples.
+        This preserves backward compatibility with various test expectations.
+        """
+        # Helper to extract ndarray from potential wrapper
+        def to_ndarray(x: Any) -> np.ndarray:
+            if isinstance(x, np.ndarray):
+                return x.astype(np.int32, copy=False)
+            # Grid wrapper with .data
+            if hasattr(x, "data"):
+                return np.asarray(getattr(x, "data")).astype(np.int32, copy=False)
+            # Fallback: try numpy array cast
+            return np.asarray(x).astype(np.int32, copy=False)
+
+        # Normalize train_examples that might be a list of TrainExample wrappers
+        normalized_train: List[Tuple[np.ndarray, np.ndarray]] = []
+        for ex in self.train_examples:
+            if isinstance(ex, tuple) and len(ex) == 2:
+                inp, out = ex
+            else:
+                # TrainExample wrapper with .input and .output (each a Grid)
+                inp = getattr(ex, "input", None)
+                out = getattr(ex, "output", None)
+            if inp is None or out is None:
+                raise ValueError("Invalid training example format; expected (input, output) or TrainExample")
+            normalized_train.append((to_ndarray(inp), to_ndarray(out)))
+        self.train_examples = normalized_train
+
+        # Normalize test_inputs that might be a list of Grid or TestExample wrappers
+        normalized_test: List[np.ndarray] = []
+        for ti in self.test_inputs:
+            candidate = ti
+            if hasattr(ti, "input") and not hasattr(ti, "data"):
+                # TestExample wrapper with .input -> Grid
+                candidate = getattr(ti, "input")
+            normalized_test.append(to_ndarray(candidate))
+        self.test_inputs = normalized_test
+
+    # Compatibility properties for older tests that expect Task.train / Task.test with wrappers
+    @property
+    def train(self) -> List["TrainExample"]:
+        return [TrainExample(Grid(inp), Grid(out)) for inp, out in self.train_examples]
+
+    @property
+    def test(self) -> List["TestExample"]:
+        return [TestExample(Grid(inp)) for inp in self.test_inputs]
+
 
 # Type aliases for clarity
 Grid = np.ndarray  # 2D integer array representing the puzzle grid
 Color = int  # Integer representing a color in the grid
 Position = Tuple[int, int]  # (row, col) position in the grid
 BoundingBox = Tuple[int, int, int, int]  # (min_row, min_col, max_row, max_col)
+
+
+# Lightweight wrappers to satisfy external test expectations
+@dataclass
+class Grid:
+    data: np.ndarray
+
+    def __post_init__(self) -> None:
+        arr = np.asarray(self.data)
+        assert arr.ndim == 2, "Grid must be 2D"
+        # Store as int32 without copying when possible
+        self.data = arr.astype(np.int32, copy=False)
+
+    # Compatibility: expose ndarray-like attributes
+    @property
+    def shape(self) -> Tuple[int, int]:
+        return self.data.shape  # type: ignore[no-any-return]
+
+    def __array__(self) -> np.ndarray:
+        return self.data
+
+
+@dataclass
+class TrainExample:
+    input: Grid
+    output: Grid
+
+
+@dataclass
+class TestExample:
+    input: Grid

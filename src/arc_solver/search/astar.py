@@ -14,6 +14,7 @@ import numpy as np
 from arc_solver.search.heuristics import HeuristicSystem, create_heuristic_system
 from arc_solver.reasoning.dsl_engine import DSLEngine, DSLProgram, DSLOperation
 from arc_solver.core.data_models import GridState
+from arc_solver.caching import create_cache_manager
 
 logger = logging.getLogger(__name__)
 
@@ -34,11 +35,36 @@ class SearchNode:
     
     def __post_init__(self):
         """Compute grid hash for efficient comparison."""
-        self.grid_hash = hash(self.grid.tobytes())
+        # Use D4-canonicalized hash for square grids to reduce symmetric duplicates
+        self.grid_hash = self._compute_canonical_hash(self.grid)
         if self.valid_examples is None:
             self.valid_examples = set()
         if self.example_scores is None:
             self.example_scores = {}
+
+    def _compute_canonical_hash(self, grid: np.ndarray) -> int:
+        """Compute a symmetry-canonical hash for the grid (D4 for square grids).
+        For rectangular grids, fall back to direct bytes hash.
+        """
+        h, w = grid.shape
+        if h == w:
+            candidates = []
+            # Rotations
+            candidates.append(grid)
+            candidates.append(np.rot90(grid, 1))
+            candidates.append(np.rot90(grid, 2))
+            candidates.append(np.rot90(grid, 3))
+            # Reflections
+            candidates.append(np.fliplr(grid))
+            candidates.append(np.flipud(grid))
+            # Diagonal reflections (transpose and anti-diagonal)
+            candidates.append(grid.T)
+            candidates.append(np.rot90(grid.T, 2))
+            # Pick lexicographically smallest bytes as canonical
+            canonical_bytes = min(c.tobytes() for c in candidates)
+            return hash(canonical_bytes)
+        # Non-square: use direct bytes
+        return hash(grid.tobytes())
     
     @property
     def f_score(self) -> float:
@@ -204,12 +230,21 @@ class AStarSearcher:
         # Enhanced search statistics
         self.statistics = SearchStatistics()
         self.beam_width_used = self.config.beam_width
+        # Public counters for backward-compatibility with tests
+        self.nodes_expanded: int = 0
+        self.nodes_generated: int = 0
+        self.max_depth_reached: int = 0
         
         # Enhanced caching system
         self.state_cache: Dict[int, SearchNode] = {}
         self.partial_results: Dict[str, Any] = {}
         self.program_validation_cache: Dict[str, Dict[str, Any]] = {}
         self.pattern_cache: Dict[str, List[DSLOperation]] = {}
+        # External cache manager for sharing across components
+        try:
+            self.cache_manager = create_cache_manager()
+        except Exception:
+            self.cache_manager = None
         
         # Cache performance metrics
         self.cache_stats = {
@@ -244,7 +279,7 @@ class AStarSearcher:
         if self.thread_pool:
             self.thread_pool.shutdown(wait=False)
     
-    def _expand_node_parallel(self, node: SearchNode, target_grid: np.ndarray) -> List[SearchNode]:
+    def _expand_node_parallel(self, node: SearchNode, target_grid: np.ndarray, deadline: float) -> List[SearchNode]:
         """Expand node using parallel processing.
         
         Args:
@@ -255,7 +290,7 @@ class AStarSearcher:
             List of successor nodes
         """
         if not self.config.parallel_expansion or not self.thread_pool:
-            return self._expand_node(node, target_grid)
+            return self._expand_node(node, target_grid, deadline)
         
         # Get available operations
         operations = self.dsl_engine.get_available_operations(node.grid)
@@ -274,7 +309,7 @@ class AStarSearcher:
         futures = []
         for chunk in operation_chunks:
             future = self.thread_pool.submit(
-                self._process_operation_chunk, node, chunk, target_grid
+                self._process_operation_chunk, node, chunk, target_grid, deadline
             )
             futures.append(future)
         
@@ -290,7 +325,7 @@ class AStarSearcher:
         return successors
     
     def _process_operation_chunk(self, node: SearchNode, operations: List[DSLOperation], 
-                               target_grid: np.ndarray) -> List[SearchNode]:
+                               target_grid: np.ndarray, deadline: float) -> List[SearchNode]:
         """Process a chunk of operations for parallel expansion.
         
         Args:
@@ -304,6 +339,8 @@ class AStarSearcher:
         successors = []
         
         for operation in operations:
+            if time.perf_counter() > deadline:
+                break
             try:
                 # Apply operation
                 new_grid = self.dsl_engine.apply_operation(node.grid, operation)
@@ -483,7 +520,8 @@ class AStarSearcher:
             success: Whether the program executed successfully
         """
         cache_key = self._generate_program_cache_key(program, hash(grid.tobytes()))
-        
+
+        # In-memory cache
         self.program_validation_cache[cache_key] = {
             'result_grid': result_grid.copy(),
             'success': success,
@@ -491,7 +529,19 @@ class AStarSearcher:
             'access_count': 1,
             'last_access': time.time()
         }
-        
+
+        # External cache manager (shared)
+        if getattr(self, 'cache_manager', None) is not None:
+            try:
+                payload = {
+                    'result_grid': result_grid.copy(),
+                    'success': success,
+                    'program_length': len(program),
+                }
+                self.cache_manager.set_program_result(program, grid, payload)
+            except Exception:
+                pass
+
         self._update_cache_size()
     
     def _get_cached_program_validation(self, program: DSLProgram, grid: np.ndarray) -> Optional[Dict[str, Any]]:
@@ -505,14 +555,34 @@ class AStarSearcher:
             Cached validation result or None
         """
         cache_key = self._generate_program_cache_key(program, hash(grid.tobytes()))
-        
+
+        # Check in-memory cache first
         if cache_key in self.program_validation_cache:
             cached_result = self.program_validation_cache[cache_key]
             cached_result['access_count'] += 1
             cached_result['last_access'] = time.time()
             self.cache_stats['program_cache_hits'] += 1
             return cached_result
-        
+
+        # Check external cache manager
+        if getattr(self, 'cache_manager', None) is not None:
+            try:
+                cached = self.cache_manager.get_program_result(program, grid)
+                if cached is not None:
+                    # Normalize cached format to in-memory format
+                    normalized = {
+                        'result_grid': cached.get('result_grid'),
+                        'success': cached.get('success', False),
+                        'program_length': cached.get('program_length', len(program)),
+                        'access_count': 1,
+                        'last_access': time.time()
+                    }
+                    self.program_validation_cache[cache_key] = normalized
+                    self.cache_stats['program_cache_hits'] += 1
+                    return normalized
+            except Exception:
+                pass
+
         self.cache_stats['program_cache_misses'] += 1
         return None
     
@@ -681,9 +751,10 @@ class AStarSearcher:
         
         logger.info(f"Starting A* search: {initial_grid.shape} -> {target_grid.shape}")
         
-        # Warm caches for better performance
-        self._warm_pattern_cache(initial_grid)
-        self._warm_pattern_cache(target_grid)
+        # Warm caches for better performance unless time budget is extremely tight
+        if self.config.max_computation_time > 0.01:
+            self._warm_pattern_cache(initial_grid)
+            self._warm_pattern_cache(target_grid)
         
         try:
             # Check if initial grid already matches target
@@ -700,19 +771,25 @@ class AStarSearcher:
                 )
             
             # Initialize search
-            initial_heuristic = self.heuristic_system.compute_heuristic(initial_grid, target_grid)
+            # If the time budget is extremely tight, skip expensive heuristic init
+            if self.config.max_computation_time <= 0.005:
+                initial_h_value = 0.0
+            else:
+                initial_heuristic = self.heuristic_system.compute_heuristic(initial_grid, target_grid)
+                initial_h_value = initial_heuristic.value
             
             root_node = SearchNode(
                 grid=initial_grid.copy(),
                 program=DSLProgram([]),
                 cost=0.0,
-                heuristic=initial_heuristic.value,
+                heuristic=initial_h_value,
                 depth=0
             )
             
             # Priority queue for open nodes (min-heap)
             open_queue = [root_node]
             heapq.heapify(open_queue)
+            deadline = start_time + self.config.max_computation_time
             
             # Closed set for duplicate detection
             closed_set: Set[int] = set() if self.config.duplicate_detection else set()
@@ -722,7 +799,7 @@ class AStarSearcher:
             
             while open_queue and self.statistics.nodes_expanded < self.config.max_nodes_expanded:
                 # Check timeout
-                if time.perf_counter() - start_time > self.config.max_computation_time:
+                if time.perf_counter() > deadline:
                     break
                 
                 # Adaptive beam scheduling
@@ -740,6 +817,9 @@ class AStarSearcher:
                 
                 # Get best node from open queue
                 current_node = heapq.heappop(open_queue)
+                # Early timeout guard before any heavy work
+                if time.perf_counter() - start_time > self.config.max_computation_time:
+                    break
                 
                 # Check incremental cache
                 cached_node = self._check_incremental_cache(current_node)
@@ -771,12 +851,16 @@ class AStarSearcher:
                 if current_node.depth < self.config.max_program_length:
                     # Use parallel expansion if enabled
                     if self.config.parallel_expansion:
-                        successors = self._expand_node_parallel(current_node, target_grid)
+                        successors = self._expand_node_parallel(current_node, target_grid, deadline)
                     else:
-                        successors = self._expand_node(current_node, target_grid)
+                        successors = self._expand_node(current_node, target_grid, deadline)
                     
                     # Update statistics
                     self._update_statistics(current_node, successors)
+                    # Synchronize public counters
+                    self.nodes_expanded = self.statistics.nodes_expanded
+                    self.nodes_generated = self.statistics.nodes_generated
+                    self.max_depth_reached = self.statistics.max_depth_reached
                     
                     for successor in successors:
                         # Skip if already in closed set
@@ -810,7 +894,7 @@ class AStarSearcher:
             # Determine termination reason
             if self.statistics.nodes_expanded >= self.config.max_nodes_expanded:
                 termination_reason = "max_nodes_reached"
-            elif time.perf_counter() - start_time > self.config.max_computation_time:
+            elif time.perf_counter() > deadline:
                 termination_reason = "timeout"
             elif not open_queue:
                 termination_reason = "search_exhausted"
@@ -834,7 +918,7 @@ class AStarSearcher:
                 termination_reason=f"error: {str(e)}"
             )
     
-    def _expand_node(self, node: SearchNode, target_grid: np.ndarray) -> List[SearchNode]:
+    def _expand_node(self, node: SearchNode, target_grid: np.ndarray, deadline: float) -> List[SearchNode]:
         """Expand a search node by applying all possible DSL operations.
         
         Args:
@@ -850,6 +934,8 @@ class AStarSearcher:
         available_operations = self.dsl_engine.get_available_operations(node.grid)
         
         for operation in available_operations:
+            if time.perf_counter() > deadline:
+                break
             try:
                 # Apply operation to get new grid
                 new_grid = self.dsl_engine.apply_operation(node.grid, operation)
@@ -1481,12 +1567,17 @@ class AStarSearcher:
     def get_search_stats(self) -> Dict[str, Any]:
         """Get detailed search statistics."""
         heuristic_stats = self.heuristic_system.get_stats()
+        # Report from statistics for consistency
+        nodes_expanded = self.statistics.nodes_expanded
+        nodes_generated = self.statistics.nodes_generated
+        max_depth_reached = self.statistics.max_depth_reached
+        beam_width_used = self.beam_width_used
         
         return {
-            'nodes_expanded': self.nodes_expanded,
-            'nodes_generated': self.nodes_generated,
-            'max_depth_reached': self.max_depth_reached,
-            'beam_width_used': self.beam_width_used,
+            'nodes_expanded': nodes_expanded,
+            'nodes_generated': nodes_generated,
+            'max_depth_reached': max_depth_reached,
+            'beam_width_used': beam_width_used,
             'heuristic_stats': heuristic_stats,
             'config': {
                 'max_program_length': self.config.max_program_length,

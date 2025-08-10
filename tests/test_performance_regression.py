@@ -178,7 +178,12 @@ class TestPerformanceRegression:
                                f"{result['current']*1000000:.1f}µs vs baseline {result['baseline']*1000000:.1f}µs "
                                f"({result['relative_change']:+.1%})")
         
-        logger.info(f"DSL operations performance: {[f'{op.primitive_name}={current_metrics[f\"{op.primitive_name}_avg_time\"]*1000000:.1f}µs' for op in operations]}")
+        # Build summary string without nested f-string escapes
+        parts = []
+        for op in operations:
+            avg_key = f"{op.primitive_name}_avg_time"
+            parts.append(f"{op.primitive_name}={current_metrics[avg_key]*1000000:.1f}µs")
+        logger.info(f"DSL operations performance: {parts}")
     
     def test_search_performance_regression(self):
         """Test search performance hasn't regressed."""

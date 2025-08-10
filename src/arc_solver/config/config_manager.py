@@ -62,6 +62,24 @@ class ConfigManager:
                 # Compose configuration with overrides
                 cfg = compose(config_name=config_name, overrides=overrides or [])
                 
+                # Phase 1: enforce determinism defaults unless explicitly overridden
+                try:
+                    with OmegaConf.open_dict(cfg):
+                        # Set deterministic testing defaults if not set
+                        if 'development' in cfg and 'testing' in cfg.development:
+                            testing = cfg.development.testing
+                            if testing.get('deterministic_mode', None) is None:
+                                testing.deterministic_mode = True
+                            if testing.get('random_seed', None) is None:
+                                testing.random_seed = 42
+                        # Force GPU mock off in CI unless user enables
+                        if 'development' in cfg and 'testing' in cfg.development:
+                            testing = cfg.development.testing
+                            if testing.get('mock_gpu', None) is None:
+                                testing.mock_gpu = False
+                except Exception:
+                    pass
+                
                 # Validate configuration if requested
                 if validate:
                     validate_config(cfg)
@@ -100,9 +118,10 @@ class ConfigManager:
             raise RuntimeError("No configuration loaded. Call load_config() first.")
         
         # Apply updates using OmegaConf
-        with OmegaConf.open_dict(self.config):
+        from omegaconf import open_dict
+        with open_dict(self.config):
             for key, value in updates.items():
-                OmegaConf.set(self.config, key, value)
+                OmegaConf.update(self.config, key, value, merge=True)
         
         logger.info(f"Configuration updated with: {updates}")
     
@@ -152,8 +171,9 @@ class ConfigManager:
         if self.config is None:
             raise RuntimeError("No configuration loaded. Call load_config() first.")
         
-        with OmegaConf.open_dict(self.config):
-            OmegaConf.set(self.config, key, value)
+        from omegaconf import open_dict
+        with open_dict(self.config):
+            OmegaConf.update(self.config, key, value, merge=True)
         
         logger.debug(f"Parameter set: {key} = {value}")
     
@@ -271,9 +291,10 @@ class ConfigContext:
             self.original_values[key] = OmegaConf.select(self.config, key)
         
         # Apply changes
-        with OmegaConf.open_dict(self.config):
+        from omegaconf import open_dict
+        with open_dict(self.config):
             for key, value in self.changes.items():
-                OmegaConf.set(self.config, key, value)
+                OmegaConf.update(self.config, key, value, merge=True)
         
         return self.config
     
@@ -283,13 +304,14 @@ class ConfigContext:
             return
         
         # Restore original values
-        with OmegaConf.open_dict(self.config):
+        from omegaconf import open_dict
+        with open_dict(self.config):
             for key, value in self.original_values.items():
                 if value is not None:
-                    OmegaConf.set(self.config, key, value)
+                    OmegaConf.update(self.config, key, value, merge=True)
                 else:
                     # Remove key if it didn't exist originally
                     try:
-                        OmegaConf.set(self.config, key, None)
+                        OmegaConf.update(self.config, key, None, merge=True)
                     except Exception:
                         pass

@@ -449,11 +449,13 @@ class SyntheticDataGenerator:
         """
         # Choose grid size based on difficulty
         if difficulty == 'easy':
-            size = random.choice(self.grid_sizes[:2])  # Smaller grids
+            candidates = self.grid_sizes[:2]
         elif difficulty == 'medium':
-            size = random.choice(self.grid_sizes[1:3])  # Medium grids
+            candidates = self.grid_sizes[1:3]
         else:  # hard
-            size = random.choice(self.grid_sizes[2:])  # Larger grids
+            candidates = self.grid_sizes[2:] or self.grid_sizes  # Fallback if empty
+
+        size = random.choice(candidates)
         
         return self._create_specific_grid(size, difficulty)
     

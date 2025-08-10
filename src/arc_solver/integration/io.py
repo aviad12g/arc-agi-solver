@@ -3,9 +3,10 @@
 import json
 import hashlib
 from pathlib import Path
-from typing import Dict, Iterator, List, Optional, Tuple, Union
+from typing import Dict, Iterator, List, Optional, Tuple, Union, Any
 import numpy as np
-from arc_solver.core.data_models import Task
+from arc_solver.core.data_models import Task, TrainExample, TestExample, Grid
+from dataclasses import dataclass
 
 
 class ARCDataLoader:
@@ -350,3 +351,49 @@ def verify_dataset_integrity(data_dir: Union[str, Path]) -> Dict[str, int]:
             stats["errors"].append(f"Task {task_id}: {e}")
     
     return stats
+
+
+# Convenience functions expected by tests
+@dataclass
+class LoadedTaskShim:
+    """Lightweight task shim exposing wrapper lists as expected by some tests."""
+    task_id: str
+    train_examples: List[TrainExample]
+    test_inputs: List[TestExample]
+
+
+def load_arc_task(task_file: Union[str, Path]) -> LoadedTaskShim:
+    """Load a single ARC task from a JSON file path.
+    
+    Parses JSON with keys 'train' and 'test'. The task_id is derived from the filename stem.
+    """
+    path = Path(task_file)
+    if not path.exists():
+        raise FileNotFoundError(f"Task file not found: {path}")
+    with open(path, 'r') as f:
+        task_data = json.load(f)
+    
+    # Return legacy-style Task with wrapper classes to satisfy tests
+    train_examples_wrapped: List[TrainExample] = []
+    for ex in task_data.get("train", []):
+        input_grid = Grid(np.array(ex["input"], dtype=np.int32))
+        output_grid = Grid(np.array(ex["output"], dtype=np.int32))
+        train_examples_wrapped.append(TrainExample(input_grid, output_grid))
+    
+    test_inputs_wrapped: List[TestExample] = []
+    for ex in task_data.get("test", []):
+        input_grid = Grid(np.array(ex["input"], dtype=np.int32))
+        test_inputs_wrapped.append(TestExample(input_grid))
+
+    # Return shim that preserves wrapped examples for tests that inspect wrappers directly
+    return LoadedTaskShim(task_id=path.stem,
+                          train_examples=train_examples_wrapped,
+                          test_inputs=test_inputs_wrapped)
+
+
+def save_results(results: Dict[str, Any], output_file: Union[str, Path]) -> None:
+    """Save results dictionary to a JSON file."""
+    out_path = Path(output_file)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(out_path, 'w') as f:
+        json.dump(results, f, indent=2)

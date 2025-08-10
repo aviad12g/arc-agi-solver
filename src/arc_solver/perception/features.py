@@ -600,9 +600,12 @@ class SpectralFeatureComputer:
         # Compute original features
         original_features = self.compute_spectral_features(blobs, adjacency_graph)
         
-        # Create permuted blob list and adjacency graph
-        permutation = list(range(len(blobs)))
-        np.random.shuffle(permutation)
+        # Create deterministic permuted blob list and adjacency graph (no randomness)
+        # Rotate indices by 1 as a fixed, reproducible permutation
+        n = len(blobs)
+        permutation = list(range(n))
+        if n > 1:
+            permutation = permutation[1:] + permutation[:1]
         
         permuted_blobs = [blobs[i] for i in permutation]
         
@@ -877,10 +880,8 @@ class PersistentHomologyComputer:
                     compactness * np.exp(-(t - 0.8)**2 * 8)
                 )
             
-            # Add some noise based on blob properties
-            center_r, center_c = blob.center_of_mass
-            noise_scale = 0.1 * (center_r + center_c) / sum(grid_shape)
-            landscape += np.random.normal(0, noise_scale, self.landscape_resolution).astype(np.float32)
+            # Deterministic fallback: REMOVE random noise to ensure reproducibility
+            # (Previously added feature noise caused nondeterminism in pipelines.)
             
             # Ensure non-negative and normalize
             landscape = np.maximum(landscape, 0)
@@ -914,15 +915,19 @@ class PersistentHomologyComputer:
         if not self.gudhi_available:
             return True
         
-        # Create rotated versions of blobs (simplified test)
-        # In practice, this would require actual geometric rotation
+        # Create deterministically perturbed versions of blobs (simplified test)
+        # Avoid randomness to ensure reproducibility
         try:
             # Test with slightly perturbed blobs
             perturbed_blobs = []
             for blob in blobs:
-                # Add small perturbation to simulate rotation effects
-                perturbed_pixels = [(r + np.random.randint(-1, 2), c + np.random.randint(-1, 2)) 
-                                  for r, c in blob.pixels]
+                # Apply fixed offset pattern to simulate a small, deterministic perturbation
+                # Offsets cycle through [(1,0), (0,1), (-1,0), (0,-1)]
+                offsets = [(1, 0), (0, 1), (-1, 0), (0, -1)]
+                perturbed_pixels = []
+                for idx, (r, c) in enumerate(blob.pixels):
+                    dr, dc = offsets[idx % 4]
+                    perturbed_pixels.append((r + dr, c + dc))
                 perturbed_pixels = [(max(0, r), max(0, c)) for r, c in perturbed_pixels]
                 
                 if perturbed_pixels:

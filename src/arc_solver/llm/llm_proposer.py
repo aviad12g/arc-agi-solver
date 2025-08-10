@@ -18,6 +18,13 @@ from .prompt_templates import PromptTemplate, create_arc_prompt_template
 
 logger = logging.getLogger(__name__)
 
+# Expose patchable symbols for tests (will be monkey-patched by unit tests)
+# Default to None so test mocks can attach these attributes even if transformers
+# is not installed in the local environment.
+AutoTokenizer = None  # type: ignore
+AutoModelForCausalLM = None  # type: ignore
+BitsAndBytesConfig = None  # type: ignore
+
 
 @dataclass
 class LLMConfig:
@@ -75,7 +82,12 @@ class LLMProposer:
         try:
             # Try to import transformers and related libraries
             import torch
-            from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
+            global AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
+            if AutoTokenizer is None or AutoModelForCausalLM is None or BitsAndBytesConfig is None:
+                from transformers import AutoTokenizer as HF_AutoTokenizer, AutoModelForCausalLM as HF_AutoModelForCausalLM, BitsAndBytesConfig as HF_BitsAndBytesConfig
+                AutoTokenizer = HF_AutoTokenizer
+                AutoModelForCausalLM = HF_AutoModelForCausalLM
+                BitsAndBytesConfig = HF_BitsAndBytesConfig
             
             logger.info(f"Loading LLM model: {self.config.model_name}")
             
@@ -330,7 +342,7 @@ class LLMProposer:
         # Check if target matches rotated input
         try:
             # 90-degree rotation
-            rotated_90 = np.rot90(input_grid)
+            rotated_90 = np.rot90(input_grid, -1)  # clockwise 90 to match Rotate90 primitive
             symmetry_analysis['rotation_90'] = np.array_equal(rotated_90, target_grid)
             
             # 180-degree rotation
@@ -341,11 +353,11 @@ class LLMProposer:
             rotated_270 = np.rot90(input_grid, 3)
             symmetry_analysis['rotation_270'] = np.array_equal(rotated_270, target_grid)
             
-            # Horizontal reflection
+            # Horizontal reflection (left-right flip corresponds to ReflectH)
             reflected_h = np.fliplr(input_grid)
             symmetry_analysis['reflection_horizontal'] = np.array_equal(reflected_h, target_grid)
             
-            # Vertical reflection
+            # Vertical reflection (up-down flip corresponds to ReflectV)
             reflected_v = np.flipud(input_grid)
             symmetry_analysis['reflection_vertical'] = np.array_equal(reflected_v, target_grid)
             
@@ -465,59 +477,13 @@ class LLMProposer:
                     else:
                         return None
             
-            # Parse operations
-            operation_strings = [op.strip() for op in program_text.split('->')]
-            operations = []
-            
-            for op_str in operation_strings:
-                if not op_str:
-                    continue
-                
-                # Parse operation name and parameters
-                if '(' in op_str and ')' in op_str:
-                    # Operation with parameters
-                    name = op_str.split('(')[0].strip()
-                    param_str = op_str.split('(')[1].split(')')[0].strip()
-                    
-                    # Parse parameters (simplified)
-                    params = {}
-                    if param_str:
-                        for param in param_str.split(','):
-                            if '=' in param:
-                                key, value = param.split('=', 1)
-                                key = key.strip()
-                                value = value.strip()
-                                
-                                # Try to convert to appropriate type
-                                try:
-                                    if value.isdigit():
-                                        params[key] = int(value)
-                                    elif value.replace('.', '').isdigit():
-                                        params[key] = float(value)
-                                    else:
-                                        params[key] = value
-                                except:
-                                    params[key] = value
-                else:
-                    # Operation without parameters
-                    name = op_str.strip()
-                    params = {}
-                
-                # Create operation
-                operation = DSLOperation(name, params)
-                operations.append(operation)
-            
-            # Create program
-            if operations:
-                program = DSLProgram(operations)
-                
-                # Validate program
-                is_valid, error = self.dsl_engine.validate_program(program)
-                if is_valid:
-                    return program
-                else:
-                    logger.debug(f"Invalid program: {error}")
-                    return None
+            # Delegate to DSLEngine grammar parser for robust parsing
+            program = self.dsl_engine.parse_dsl_program(program_text)
+            is_valid, error = self.dsl_engine.validate_program(program)
+            if is_valid:
+                return program
+            logger.debug(f"Invalid program from parsed text: {error}")
+            return None
             
             return None
             

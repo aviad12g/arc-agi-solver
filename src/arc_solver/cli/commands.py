@@ -7,6 +7,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+import os
 import random
 import numpy as np
 
@@ -48,6 +49,9 @@ class ARCSolver:
         self.cache_manager = create_cache_manager(self.config.get('system', {}).get('caching'))
         self.heuristic_system = create_heuristic_system()
         self.dsl_engine = DSLEngine()
+
+        # Apply deterministic settings if enabled in config
+        self._apply_determinism()
         
         # Create searcher with config parameters
         search_config = self.config.get('search', {})
@@ -58,6 +62,35 @@ class ARCSolver:
         )
         
         logger.info("ARC solver initialized successfully")
+
+    def _apply_determinism(self) -> None:
+        """Apply deterministic settings (seeds and library flags) from config."""
+        try:
+            testing_cfg = self.config.get('development', {}).get('testing', {})
+            deterministic = bool(testing_cfg.get('deterministic_mode', False))
+            seed = int(testing_cfg.get('random_seed', 42))
+        except Exception:
+            deterministic = False
+            seed = 42
+
+        if not deterministic:
+            return
+
+        # Python and NumPy seeds
+        random.seed(seed)
+        np.random.seed(seed)
+        os.environ['PYTHONHASHSEED'] = str(seed)
+
+        # Optional: torch if installed
+        try:
+            import torch  # type: ignore
+            torch.manual_seed(seed)
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed_all(seed)
+            torch.backends.cudnn.deterministic = True  # type: ignore
+            torch.backends.cudnn.benchmark = False     # type: ignore
+        except Exception:
+            pass
     
     def solve_task(self, task, timeout: float = 30.0, use_multi_example: bool = True) -> Dict[str, Any]:
         """Solve a single ARC task.
@@ -74,11 +107,52 @@ class ARCSolver:
         
         try:
             with TimeoutHandler(timeout) as timeout_handler:
-                if not task.train_examples:
+                # Support tests that pass MagicMock task with .train and .test
+                train_examples = getattr(task, 'train_examples', None)
+                if (train_examples is None or not isinstance(train_examples, list)) and hasattr(task, 'train'):
+                    try:
+                        # Build (input, output) tuples from mocked TrainExample-like objects
+                        train_examples = [(np.array(te.input), np.array(te.output)) for te in task.train]
+                    except Exception:
+                        train_examples = []
+
+                test_inputs = getattr(task, 'test_inputs', None)
+                if (test_inputs is None or not isinstance(test_inputs, list)) and hasattr(task, 'test'):
+                    try:
+                        test_inputs = [np.array(te.input) for te in task.test]
+                    except Exception:
+                        test_inputs = []
+
+                # Final normalization/validation
+                if isinstance(train_examples, list):
+                    normalized = []
+                    for ex in train_examples:
+                        try:
+                            a, b = ex
+                            normalized.append((np.asarray(a), np.asarray(b)))
+                        except Exception:
+                            continue
+                    train_examples = normalized
+                else:
+                    train_examples = []
+
+                if isinstance(test_inputs, list):
+                    test_inputs = [np.asarray(ti) for ti in test_inputs]
+                else:
+                    test_inputs = []
+
+                if not train_examples:
                     return {
                         'success': False,
                         'error': 'No training examples provided',
-                        'computation_time': time.perf_counter() - start_time
+                        'computation_time': time.perf_counter() - start_time,
+                        'predictions': [None],
+                        'task_id': getattr(task, 'task_id', None),
+                        'search_stats': {
+                            'nodes_expanded': 0,
+                            'nodes_generated': 0,
+                            'termination_reason': 'invalid_task'
+                        }
                     }
                 
                 # Check for timeout
@@ -86,18 +160,65 @@ class ARCSolver:
                     return {
                         'success': False,
                         'error': 'Timeout during initialization',
-                        'computation_time': time.perf_counter() - start_time
+                        'computation_time': time.perf_counter() - start_time,
+                        'predictions': [None],
+                        'task_id': getattr(task, 'task_id', None),
+                        'search_stats': {
+                            'nodes_expanded': 0,
+                            'nodes_generated': 0,
+                            'termination_reason': 'timeout'
+                        }
                     }
                 
+                # Apply timeout to searcher config to enforce wallclock bounds
+                try:
+                    self.searcher.config.max_computation_time = float(timeout)
+                except Exception:
+                    pass
+
+                # Quick-path: try common single-op transforms before full search
+                try:
+                    trivial_ops = [
+                        self.dsl_engine.create_operation('Rotate90'),
+                        self.dsl_engine.create_operation('Rotate180'),
+                        self.dsl_engine.create_operation('ReflectH'),
+                        self.dsl_engine.create_operation('ReflectV'),
+                    ]
+                    input_grid, output_grid = train_examples[0]
+                    for op in trivial_ops:
+                        quick_grid = self.dsl_engine.apply_operation(input_grid, op)
+                        if np.array_equal(quick_grid, output_grid):
+                            # Found direct solution
+                            program = self.dsl_engine.create_program([op])
+                            test_predictions = []
+                            for test_input in test_inputs:
+                                pred, _ = self.dsl_engine.execute_program(program, test_input)
+                                test_predictions.append(pred.tolist())
+                            return {
+                                'success': True,
+                                'program': program.to_dict(),
+                                'predictions': test_predictions,
+                                'search_stats': {
+                                    'nodes_expanded': 0,
+                                    'nodes_generated': 0,
+                                    'max_depth_reached': 1,
+                                    'termination_reason': 'trivial_solution'
+                                },
+                                'computation_time': time.perf_counter() - start_time,
+                                'task_id': getattr(task, 'task_id', None)
+                            }
+                except Exception:
+                    pass
+
                 # Choose search method based on configuration
-                if use_multi_example and len(task.train_examples) > 1:
+                if use_multi_example and len(train_examples) > 1:
                     # Use multi-example search for better accuracy
-                    logger.info(f"Using multi-example search with {len(task.train_examples)} training examples")
-                    search_result = self.searcher.search_multi_example(task.train_examples)
+                    logger.info(f"Using multi-example search with {len(train_examples)} training examples")
+                    search_result = self.searcher.search_multi_example(train_examples)
                 else:
                     # Fallback to single-example search
                     logger.info("Using single-example search")
-                    input_grid, output_grid = task.train_examples[0]
+                    input_grid, output_grid = train_examples[0]
                     search_result = self.searcher.search(input_grid, output_grid)
                 
                 computation_time = time.perf_counter() - start_time
@@ -105,7 +226,7 @@ class ARCSolver:
                 if search_result.success:
                     # Apply found program to test input
                     test_predictions = []
-                    for test_input in task.test_inputs:
+                    for test_input in test_inputs:
                         try:
                             # Execute the found program on test input
                             predicted_output, exec_info = self.dsl_engine.execute_program(
@@ -138,7 +259,8 @@ class ARCSolver:
                         'program': search_result.program.to_dict(),
                         'predictions': test_predictions,
                         'search_stats': search_stats,
-                        'computation_time': computation_time
+                        'computation_time': computation_time,
+                        'task_id': getattr(task, 'task_id', None)
                     }
                 else:
                     # Include multi-example validation stats
@@ -161,16 +283,24 @@ class ARCSolver:
                         'success': False,
                         'error': f'Search failed: {search_result.termination_reason}',
                         'search_stats': search_stats,
-                        'computation_time': computation_time
+                        'predictions': [None for _ in test_inputs],
+                        'computation_time': computation_time,
+                        'task_id': getattr(task, 'task_id', None)
                     }
                     
         except Exception as e:
             computation_time = time.perf_counter() - start_time
             logger.error(f"Error solving task: {e}")
+            # Provide minimal search stats structure for callers
             return {
                 'success': False,
                 'error': str(e),
-                'computation_time': computation_time
+                'computation_time': computation_time,
+                'search_stats': {
+                    'nodes_expanded': 0,
+                    'nodes_generated': 0,
+                    'termination_reason': 'error'
+                }
             }
     
     def get_stats(self) -> Dict[str, Any]:
@@ -448,13 +578,13 @@ def test_command(args) -> int:
         Exit code
     """
     try:
-        print("🧪 Running ARC Solver System Tests")
+        print("Running ARC Solver System Tests")
         print("=" * 50)
         
         all_passed = True
         
         if args.component in ['perception', 'all']:
-            print("\n📊 Testing Perception Components...")
+            print("\nTesting Perception Components...")
             
             # Test blob labeling
             try:
@@ -462,35 +592,35 @@ def test_command(args) -> int:
                 test_grid = np.array([[1, 1, 0], [1, 1, 0], [0, 0, 2]], dtype=np.int32)
                 blobs, _ = blob_labeler.label_blobs(test_grid)
                 assert len(blobs) == 2, f"Expected 2 blobs, got {len(blobs)}"
-                print("  ✅ Blob labeling")
+                print("  OK Blob labeling")
             except Exception as e:
-                print(f"  ❌ Blob labeling: {e}")
+                print(f"  FAIL Blob labeling: {e}")
                 all_passed = False
             
             # Test feature extraction
             try:
                 orbit_computer = create_orbit_signature_computer()
                 # This would need a proper blob object
-                print("  ✅ Feature extraction")
+                print("  OK Feature extraction")
             except Exception as e:
-                print(f"  ❌ Feature extraction: {e}")
+                print(f"  FAIL Feature extraction: {e}")
                 all_passed = False
         
         if args.component in ['reasoning', 'all']:
-            print("\n🧠 Testing Reasoning Components...")
+            print("\nTesting Reasoning Components...")
             
             # Test DSL engine
             try:
                 dsl_engine = DSLEngine()
                 test_grid = [[1, 2], [3, 4]]
                 # Test would need proper DSL operations
-                print("  ✅ DSL engine")
+                print("  OK DSL engine")
             except Exception as e:
-                print(f"  ❌ DSL engine: {e}")
+                print(f"  FAIL DSL engine: {e}")
                 all_passed = False
         
         if args.component in ['search', 'all']:
-            print("\n🔍 Testing Search Components...")
+            print("\nTesting Search Components...")
             
             # Test heuristic system
             try:
@@ -499,21 +629,21 @@ def test_command(args) -> int:
                 test_grid2 = [[4, 3], [2, 1]]
                 result = heuristic_system.compute_heuristic(test_grid1, test_grid2)
                 assert result.value >= 0, "Heuristic value should be non-negative"
-                print("  ✅ Heuristic system")
+                print("  OK Heuristic system")
             except Exception as e:
-                print(f"  ❌ Heuristic system: {e}")
+                print(f"  FAIL Heuristic system: {e}")
                 all_passed = False
             
             # Test A* searcher
             try:
                 searcher = create_astar_searcher(max_nodes_expanded=10)
-                print("  ✅ A* searcher")
+                print("  OK A* searcher")
             except Exception as e:
-                print(f"  ❌ A* searcher: {e}")
+                print(f"  FAIL A* searcher: {e}")
                 all_passed = False
         
         if args.component in ['caching', 'all']:
-            print("\n🗄️  Testing Caching Components...")
+            print("\nTesting Caching Components...")
             
             # Test cache manager
             try:
@@ -521,9 +651,9 @@ def test_command(args) -> int:
                 cache_manager.set("test_key", "test_value")
                 value = cache_manager.get("test_key")
                 assert value == "test_value", "Cache get/set failed"
-                print("  ✅ Cache manager")
+                print("  OK Cache manager")
             except Exception as e:
-                print(f"  ❌ Cache manager: {e}")
+                print(f"  FAIL Cache manager: {e}")
                 all_passed = False
         
         # Test configuration
@@ -539,10 +669,10 @@ def test_command(args) -> int:
         # Summary
         print("\n" + "=" * 50)
         if all_passed:
-            print("✅ All tests passed!")
+            print("All tests passed!")
             return 0
         else:
-            print("❌ Some tests failed!")
+            print("Some tests failed!")
             return 1
             
     except Exception as e:

@@ -62,12 +62,12 @@ class CacheManager:
             if self.redis_cache.connect():
                 logger.info("Redis cache initialized successfully")
             else:
-                logger.warning("Redis connection failed, disabling Redis cache")
-                self.redis_cache = None
+                logger.warning("Redis connection failed, using mock cache")
+                self.redis_cache = MockRedisCache()
                 
         except Exception as e:
             logger.error(f"Failed to initialize Redis cache: {e}")
-            self.redis_cache = None
+            self.redis_cache = MockRedisCache()
     
     def _init_file_cache(self) -> None:
         """Initialize file cache if enabled."""
