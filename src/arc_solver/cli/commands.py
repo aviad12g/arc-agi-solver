@@ -20,6 +20,7 @@ from arc_solver.search.heuristics import create_heuristic_system
 from arc_solver.reasoning.dsl_engine import DSLEngine
 from arc_solver.perception.blob_labeling import create_blob_labeler
 from arc_solver.perception.features import create_orbit_signature_computer
+from arc_solver.solver.formula_layer.solver import solve_with_templates
 
 from .utils import (
     load_task_from_file, save_results, find_task_files, format_duration,
@@ -207,6 +208,31 @@ class ARCSolver:
                                 'computation_time': time.perf_counter() - start_time,
                                 'task_id': getattr(task, 'task_id', None)
                             }
+                except Exception:
+                    pass
+
+                # Try Formula Layer first (exact templates)
+                try:
+                    template_program = solve_with_templates(train_examples, self.dsl_engine)
+                    if template_program is not None:
+                        # Execute on test inputs and return early
+                        test_predictions = []
+                        for test_input in test_inputs:
+                            pred, _ = self.dsl_engine.execute_program(template_program, test_input)
+                            test_predictions.append(pred.tolist())
+                        return {
+                            'success': True,
+                            'program': template_program.to_dict(),
+                            'predictions': test_predictions,
+                            'search_stats': {
+                                'nodes_expanded': 0,
+                                'nodes_generated': 0,
+                                'max_depth_reached': len(template_program.operations),
+                                'termination_reason': 'formula_layer_solution'
+                            },
+                            'computation_time': time.perf_counter() - start_time,
+                            'task_id': getattr(task, 'task_id', None)
+                        }
                 except Exception:
                     pass
 
