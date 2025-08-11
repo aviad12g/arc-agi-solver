@@ -1,17 +1,13 @@
-# ARC-AGI Solver Optimization Plan: 10x-100x Enhancement
+# ARC-AGI Solver – practical optimization notes
 
-## Executive Summary
-
-This optimization plan addresses the critical performance gap in the current ARC-AGI solver, which shows 0% success rate on test tasks despite sophisticated architecture. The plan focuses on five key areas that will dramatically improve solver capability within a ~$10k budget, targeting >35% accuracy on ARC-AGI-2 public split.
+These are pragmatic engineering notes for incremental improvements. No guarantees or targets; profile first, change one thing at a time, keep tests green.
 
 ## Current System Analysis
 
-### Performance Issues Identified
-- **0% Success Rate**: All 10 test tasks failed with "search_exhausted" 
-- **Search Inefficiency**: Average 600 nodes expanded without finding solutions
-- **Single Example Bias**: Only uses first training example, leading to overfitting
-- **Limited DSL Coverage**: Missing key transformation primitives
-- **Suboptimal Heuristics**: Tier-1 heuristic not fully implemented
+### Issues observed locally
+- Search can exhaust budget on tasks with paint/crop permutations.
+- Heuristic feature recomputation happens more than it should; cache reuse helps.
+- Some primitives generate too many parameter combos; up‑front pruning pays off.
 
 ### Root Cause Analysis
 1. **Multi-example validation missing**: Programs that work on one example fail on others
@@ -19,18 +15,13 @@ This optimization plan addresses the critical performance gap in the current ARC
 3. **Search space explosion**: Heuristics insufficient for pruning
 4. **LLM integration underutilized**: Powerful guidance system not optimized
 
-## Optimization Strategy
+## Short, concrete steps
 
-### Phase 1: Multi-Example Reasoning (Priority 1)
-**Impact**: Immediate 10x+ improvement in solution quality
-**Budget**: $500 (development time)
-**Timeline**: 1-2 weeks
+### A. Multi‑example validation
 
-#### Problem
-Current system only validates against first training example, leading to false solutions that fail on other examples.
+Problem: false positives that only fit the first example.
 
-#### Solution
-Implement comprehensive multi-example validation:
+Sketch solution (already partially present in code):
 
 ```python
 def multi_example_search(self, task: Task) -> SearchResult:
@@ -54,16 +45,13 @@ def multi_example_search(self, task: Task) -> SearchResult:
     return SearchResult(success=False)
 ```
 
-#### Implementation Tasks
-1. Modify `AStarSearcher.search()` to accept multiple target grids
-2. Update heuristic computation to consider all examples
-3. Implement early pruning for programs that fail any example
-4. Add caching for multi-example validation results
+Checklist
+1. Keep early pruning when any example fails.
+2. Cache per‑program per‑example results.
+3. Keep length limits strict to avoid blow‑ups.
 
-### Phase 2: DSL Expansion (Priority 2)
-**Impact**: 5x-10x improvement in task coverage
-**Budget**: $2000 (development + testing)
-**Timeline**: 2-3 weeks
+### B. Tighten DSL parameter generation
+Avoid expanding parameter spaces blindly. Prefer generators that look at grid size and color stats to emit fewer candidates.
 
 #### Missing Primitives Analysis
 Based on ARC task analysis, implement critical missing operations:
@@ -94,10 +82,8 @@ class FloodFillPrimitive(DSLPrimitive):
 - Allow K=5-6 for LLM-guided programs
 - Implement adaptive length based on task complexity
 
-### Phase 3: Enhanced Heuristics (Priority 3)
-**Impact**: 3x-5x improvement in search efficiency
-**Budget**: $1500 (development + compute)
-**Timeline**: 2 weeks
+### C. Heuristics
+Only enable expensive paths (e.g., D4 minimization, Tier‑2) under blob‑count/depth gates. Cache features keyed by grid bytes.
 
 #### Tier-1 Heuristic Enhancement
 Implement full D₄ symmetry minimization:
@@ -142,45 +128,17 @@ class LearnedHeuristicWeights:
         self.weights = np.linalg.lstsq(X, y)[0]
 ```
 
-### Phase 4: LLM Integration Optimization (Priority 4)
-**Impact**: 2x-5x improvement through AI guidance
-**Budget**: $4000 (API costs + development)
-**Timeline**: 2-3 weeks
+### D. LLM
+Keep disabled by default. If enabled, use a small local model or stubs, and always parse cautiously.
 
-#### GPT-4 Integration Strategy
-Replace local Qwen-32B with GPT-4 API for better results:
+#### Optional LLM hook
+If you enable an LLM, prefer a small local model or a stub. Keep proposal parsing strict and always require validation over examples.
 
 ```python
-class GPT4Proposer:
-    def __init__(self, api_key: str):
-        self.client = openai.OpenAI(api_key=api_key)
-    
+class LocalStubProposer:
     def generate_proposals(self, task: Task) -> List[DSLProgram]:
-        """Generate DSL programs using GPT-4."""
-        
-        # Create structured prompt
-        prompt = self.create_arc_prompt(task)
-        
-        response = self.client.chat.completions.create(
-            model="gpt-4",
-            messages=[
-                {"role": "system", "content": self.system_prompt},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.1,
-            n=3  # Generate 3 candidates
-        )
-        
-        # Parse responses into DSL programs
-        programs = []
-        for choice in response.choices:
-            try:
-                program = self.parse_dsl_response(choice.message.content)
-                programs.append(program)
-            except ParseError:
-                continue
-        
-        return programs
+        """Return a small set of conservative candidates; validate thoroughly."""
+        return []
 ```
 
 #### Enhanced Prompt Engineering
@@ -188,7 +146,7 @@ Create rich task descriptions:
 
 ```python
 def create_arc_prompt(self, task: Task) -> str:
-    """Create detailed prompt for GPT-4."""
+    """Create a compact prompt for a local model or stub."""
     
     prompt = f"""
     ARC Puzzle Analysis:
@@ -204,7 +162,7 @@ def create_arc_prompt(self, task: Task) -> str:
     Available DSL Operations:
     {self.list_dsl_operations()}
     
-    Generate a sequence of 1-4 DSL operations that transforms each input to its corresponding output.
+    Generate a sequence of up to 4 DSL operations that transforms each input to its corresponding output.
     Format as JSON: {{"operations": [...]}}
     """
     
@@ -212,14 +170,9 @@ def create_arc_prompt(self, task: Task) -> str:
 ```
 
 #### Cost Management
-- Estimate $3-5 per 1000 tasks for GPT-4 API
-- Use GPT-3.5-turbo for initial filtering ($0.50 per 1000 tasks)
-- Implement smart caching to avoid duplicate API calls
+If you use a remote API, set hard caps and cache aggressively; otherwise prefer local inference.
 
-### Phase 5: Testing & Optimization (Priority 5)
-**Impact**: 20-50% improvement through systematic tuning
-**Budget**: $2000 (compute + tools)
-**Timeline**: 1-2 weeks
+### E. Tests and profiling
 
 #### Comprehensive Testing Framework
 ```python
@@ -305,16 +258,9 @@ def profile_solver_performance():
 
 ## Expected Outcomes
 
-### Performance Targets
-- **Accuracy**: 35-50% on ARC-AGI-2 public split (vs current 0%)
-- **Runtime**: <1s median (vs current 3.3s average)
-- **Success Rate**: 143-205 tasks solved (vs current 0)
+Avoid numeric targets; report what you measured alongside hardware and seed.
 
-### Success Metrics
-1. **Multi-example validation**: 100% of solutions work on all training examples
-2. **DSL coverage**: Handle 80%+ of common ARC transformation patterns
-3. **Search efficiency**: <300 nodes expanded average (vs current 600)
-4. **LLM integration**: 95%+ parseable proposals with 60%+ success rate
+Metrics to track (lightweight): node expansions, wall‑clock per task, cache hit rates, and success on a small fixed subset.
 
 ## Risk Mitigation
 

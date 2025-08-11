@@ -6,7 +6,7 @@ build-backend = "poetry.core.masonry.api"
 name = "arc-solver"
 version = "0.1.0"
 description = "ARC-AGI Solver with mathematical perception and DSL reasoning"
-authors = ["Your Name <your.email@example.com>"]
+authors = ["Aviad Cohen <maintainers@arc-solver.local>"]
 readme = "README.md"
 packages = [{include = "arc_solver", from = "src"}]
 

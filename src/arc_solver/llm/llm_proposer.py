@@ -29,14 +29,14 @@ BitsAndBytesConfig = None  # type: ignore
 @dataclass
 class LLMConfig:
     """Configuration for LLM proposer."""
-    model_name: str = "Qwen/Qwen2.5-32B-Instruct"
-    max_tokens: int = 256
-    temperature: float = 0.7
+    model_name: str = "local/mock"
+    max_tokens: int = 128
+    temperature: float = 0.2
     top_p: float = 0.9
-    num_proposals: int = 3
-    timeout_seconds: float = 10.0
-    use_4bit_quantization: bool = True
-    gpu_memory_fraction: float = 0.8
+    num_proposals: int = 2
+    timeout_seconds: float = 5.0
+    use_4bit_quantization: bool = False
+    gpu_memory_fraction: float = 0.5
 
 
 @dataclass
@@ -517,7 +517,7 @@ class LLMProposer:
         self.total_generation_time = 0.0
 
 
-def create_llm_proposer(model_name: str = "Qwen/Qwen2.5-32B-Instruct",
+def create_llm_proposer(model_name: str = "local/mock",
                        max_tokens: int = 256,
                        num_proposals: int = 3,
                        use_4bit_quantization: bool = True) -> LLMProposer:

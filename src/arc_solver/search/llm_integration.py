@@ -26,9 +26,9 @@ class LLMIntegrationConfig:
     """Configuration for LLM-A* integration."""
     
     # LLM configuration
-    llm_enabled: bool = True
-    llm_model_name: str = "Qwen/Qwen2.5-32B-Instruct"
-    num_proposals: int = 3
+    llm_enabled: bool = False
+    llm_model_name: str = "local/mock"
+    num_proposals: int = 2
     
     # Search configuration
     original_beam_width: int = 64
@@ -863,8 +863,8 @@ class LLMIntegratedSearcher:
         return variants
 
 
-def create_llm_integrated_searcher(llm_enabled: bool = True,
-                                 llm_model_name: str = "Qwen/Qwen2.5-32B-Instruct",
+def create_llm_integrated_searcher(llm_enabled: bool = False,
+                                 llm_model_name: str = "local/mock",
                                  original_beam_width: int = 64,
                                  llm_beam_width: int = 8,
                                  max_program_length: int = None,

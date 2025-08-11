@@ -1,10 +1,10 @@
-# ARC-AGI Solver: A GPU-Accelerated Program Synthesis Framework
+# ARC-AGI Solver: A GPU‑Accelerated Program Synthesis Framework
 
-> A mathematically-grounded, production-ready system for solving Abstract Reasoning Corpus tasks through automated program synthesis. The system achieves 38-42% accuracy on the ARC-AGI-2 public split while maintaining sub-second median runtime on GPU hardware.
+> A practical system for ARC tasks using classical perception, a compact DSL, and A* search. GPU and LLM guidance are optional.
 
 ## Abstract
 
-The Abstract Reasoning Corpus (ARC) presents a fundamental challenge in artificial intelligence: the ability to learn and apply abstract patterns from minimal examples. This repository implements a novel approach that combines GPU-accelerated perception with symbolic reasoning and large language model guidance to synthesize programs that solve ARC tasks.
+This repository combines optional GPU‑accelerated perception with symbolic program synthesis. An LLM hook can be enabled for proposal generation, but the default flow is purely classical.
 
 Our system transforms raw pixel grids into rich symbolic representations through topological analysis, applies admissible heuristic search over a domain-specific language (DSL), and leverages transformer models for proposal generation. The architecture demonstrates that hybrid symbolic-neural approaches can achieve competitive performance on abstract reasoning benchmarks while maintaining computational efficiency.
 
@@ -25,46 +25,14 @@ The ARC-AGI Solver employs a four-stage pipeline that transforms visual patterns
 
 ```mermaid
 graph TD
-    A["Raw ARC Grid<br/>30×30 pixels"] --> B["GPU Blob Labeling<br/>Union-Find Algorithm"]
+    A["Raw ARC Grid<br/>30×30 pixels"] --> B["Blob Labeling<br/>Union-Find"]
     B --> C["Connected Components<br/>+ Hole Detection"]
     C --> D["Symmetry Analysis<br/>D₄ Group Operations"]
     D --> E["Feature Extraction<br/>50-D Vector"]
     
-    E --> F["DSL Program Space<br/>Geometric + Color Operations"]
-    F --> G["A* Search Engine<br/>Two-Tier Heuristics"]
-    G --> H["LLM Proposals<br/>Optional Enhancement"]
-    H --> I["Solution Program<br/>Minimal DSL Sequence"]
-    
-    subgraph "Perception Module"
-        B
-        C
-        D
-        E
-    end
-    
-    subgraph "Reasoning Engine"
-        F
-    end
-    
-    subgraph "Search Engine"
-        G
-        H
-    end
-    
-    subgraph "Synthesis Module"
-        I
-    end
-```
-
-graph TD
-    A["Raw ARC Grid<br/>30×30 pixels"] --> B["GPU Blob Labeling<br/>Union-Find Algorithm"]
-    B --> C["Connected Components<br/>+ Hole Detection"]
-    C --> D["Symmetry Analysis<br/>D₄ Group Operations"]
-    D --> E["Feature Extraction<br/>50-D Vector"]
-    
-    E --> F["DSL Program Space<br/>Geometric + Color Operations"]
-    F --> G["A* Search Engine<br/>Two-Tier Heuristics"]
-    G --> H["LLM Proposals<br/>Optional Enhancement"]
+    E --> F["DSL Program Space<br/>Geometric + Color Ops"]
+    F --> G["A* Search Engine<br/>Two‑Tier Heuristics"]
+    G --> H["LLM Proposals<br/>(optional)"]
     H --> I["Solution Program<br/>Minimal DSL Sequence"]
     
     subgraph "Perception Module"
@@ -91,10 +59,9 @@ graph TD
 The perception module transforms raw ARC grids into structured symbolic representations through several mathematical techniques:
 
 #### Blob Labeling and Connected Components
-- **GPU-accelerated union-find algorithm** for connected component detection
-- Supports both 4-connectivity and 8-connectivity neighborhoods  
-- Custom CUDA kernel achieving <2ms performance on 30×30 grids
-- Topological hole detection using flood-fill algorithms
+- Union‑find based connected components (CPU by default; GPU path optional)
+- Supports both 4‑connectivity and 8‑connectivity
+- Topological hole detection via flood‑fill
 
 #### Symmetry Detection
 - **Bitboard-based symmetry analysis** for square grids (D₄ group operations)
@@ -186,13 +153,9 @@ The synthesis module integrates neural and symbolic components:
 
 ## Theoretical Foundations
 
-### Admissible Heuristic Guarantees
+### Heuristic design
 
-The system's heuristics satisfy the admissibility criterion necessary for A* optimality:
-
-**Theorem**: For any DSL program P that transforms grid G₁ to target grid G₂, the heuristic function h(G₁, G₂) ≤ optimal_cost(P).
-
-**Proof Sketch**: Each DSL primitive moves at least one feature dimension by at least unit distance. The ℓ₂ distance between feature vectors provides a lower bound on the number of required operations.
+The heuristic functions are constructed to be admissible for A*: distances computed over feature representations are designed not to overestimate the number of required steps.
 
 ### Computational Complexity
 
@@ -203,12 +166,9 @@ The system's heuristics satisfy the admissibility criterion necessary for A* opt
 
 ### Invariance Properties
 
-The 50-dimensional feature vector exhibits several mathematical invariances:
-- **Translation invariance**: Grid shifts preserve feature values
-- **Rotation invariance**: D₄ orbit signature unchanged under 90° rotations
-- **Scale invariance**: Normalized features robust to grid resizing
+The 50‑dimensional feature vector exhibits useful invariances (translation/rotation) that stabilize heuristic comparisons.
 
-
+```mermaid
 graph LR
     subgraph "Input Grid Analysis"
         A[Grid G₁] --> B[Blob Detection]
@@ -221,47 +181,27 @@ graph LR
     end
     
     subgraph "Heuristic Computation"
-        C --> G["Tier-1: ||F₂ - F₁||₂"]
+        C --> G["Tier‑1: ||F₂ − F₁||₂"]
         F --> G
-        C --> H["Tier-2: Hungarian<br/>Blob Assignment"]
+        C --> H["Tier‑2: Hungarian<br/>Blob Assignment"]
         F --> H
-        G --> I["h(G₁, G₂) = αh₁ + βh₂"]
+        G --> I["h(G₁,G₂) = αh₁ + βh₂"]
         H --> I
     end
     
     subgraph "Search Process"
         I --> J["A* Priority Queue"]
-        J --> K["Beam Search<br/>Width = 32"]
+        J --> K["Beam Search"]
         K --> L["DSL Program<br/>Generation"]
-        L --> M{"Solution<br/>Found?"}
+        L --> M{"Solution?"}
         M -->|No| J
-        M -->|Yes| N["Optimal Program P*"]
+        M -->|Yes| N["Program P*"]
     end
+```
 
-## Performance Benchmarks
+## Performance notes
 
-### Accuracy Results
-
-| Dataset Split | GPU (T4/A100) | CPU-only |
-|---------------|---------------|----------|
-| ARC-AGI-2 Public (410 tasks) | **38.5 ± 2.1%** | 21.3 ± 1.8% |
-| ARC-AGI-2 Private (estimated) | **35.2 ± 3.0%** | 18.7 ± 2.3% |
-| Internal Validation (50 tasks) | **52.0 ± 4.2%** | 31.5 ± 3.1% |
-
-### Runtime Performance
-
-| Operation | GPU Target | GPU Actual | CPU Actual |
-|-----------|------------|------------|------------|
-| Blob labeling (30×30) | ≤2ms | 1.2 ± 0.3ms | 2.8 ± 0.4ms |
-| Feature extraction | ≤5ms | 3.1 ± 0.7ms | 12.4 ± 2.1ms |
-| Search (median) | ≤500ms | 285 ± 95ms | 1540 ± 420ms |
-| End-to-end (median) | ≤1s | 0.32 ± 0.18s | 1.87 ± 0.65s |
-
-### Memory Utilization
-
-- **GPU Memory**: 2.1 ± 0.4 GB peak usage (T4 compatible)
-- **System Memory**: 1.8 ± 0.3 GB peak usage  
-- **Cache Storage**: 50-200 MB depending on task complexity
+Performance varies by task mix and hardware. Use the provided scripts to measure locally and compare configurations (beam width, timeouts, caches, CPU vs GPU). When reporting numbers, include hardware and settings.
 
 ## Installation and Usage
 
@@ -276,8 +216,8 @@ graph LR
 
 ```bash
 # Clone repository
-git clone https://github.com/your-username/arc-agi-solver.git
-cd arc-agi-solver
+git clone https://github.com/mazalcohen/arc-agi-solver-3.git
+cd arc-agi-solver-3
 
 # Install core dependencies
 pip install numpy scipy scikit-image gudhi hydra-core pytest
@@ -328,27 +268,25 @@ python -m arc_solver.cli.main submit \
 The system uses Hydra for configuration management. Key parameters:
 
 ```yaml
-# conf/config.yaml
+# conf/config.yaml (indicative)
 perception:
-  use_gpu: true
-  connectivity: 8
+  use_gpu: false
+  connectivity: 4
   enable_hole_detection: true
 
 reasoning:
-  max_program_length: 10
-  enable_composition: true
+  max_program_length: 4
 
 search:
   algorithm: "astar"
   beam_width: 32
   max_iterations: 1000
-  heuristic_weights: [0.7, 0.3]
 
 llm:
-  enabled: true
-  model_name: "microsoft/DialoGPT-medium"
-  temperature: 0.1
-  max_proposals: 3
+  enabled: false
+  model_name: "local/mock"
+  temperature: 0.2
+  max_proposals: 2
 ```
 
 ## Implementation Details
@@ -475,7 +413,7 @@ The system includes comprehensive testing across multiple dimensions:
 
 #### Property-Based Tests
 - **Invariance verification**: Feature vector properties
-- **Correctness proofs**: DSL semantic preservation
+- **Correctness checks**: DSL semantic preservation
 - **Regression detection**: Performance degradation alerts
 
 ## Evaluation and Results
@@ -506,7 +444,7 @@ Common failure modes and their frequencies:
    - Multi-step transformations requiring deep search
    - Mitigation: Increased beam width, better heuristics
 
-2. **Novel pattern recognition** (28% of failures)  
+2. **Previously unseen pattern recognition** (28% of failures)  
    - Patterns not covered by DSL primitives
    - Mitigation: DSL expansion, improved LLM proposals
 
@@ -518,7 +456,7 @@ Common failure modes and their frequencies:
    - 50-D vector insufficient for certain patterns
    - Mitigation: Extended feature set, learned representations
 
-### Comparison with State-of-the-Art
+### Comparison with other approaches
 
 | Method | ARC-AGI-2 Accuracy | Approach |
 |--------|-------------------|----------|
@@ -599,58 +537,12 @@ solution = searcher.search(initial_state, target_state)
 searcher.export_search_tree("search_debug.json")
 ```
 
-## Future Directions
+## Future Work
 
-### Short-term Improvements (3-6 months)
-
-1. **Enhanced Feature Representations**
-   - Learned embeddings from neural networks
-   - Graph neural networks for spatial relationships
-   - Attention-based feature selection
-
-2. **Advanced Search Strategies**
-   - Monte Carlo Tree Search integration
-   - Multi-objective optimization for solution quality
-   - Parallel search across multiple hypotheses
-
-3. **Improved LLM Integration**
-   - Fine-tuned models on ARC-specific data
-   - Chain-of-thought reasoning for complex patterns
-   - Self-consistency validation of proposals
-
-### Medium-term Research (6-18 months)
-
-1. **Automated DSL Discovery**
-   - Program synthesis for primitive operations
-   - Evolutionary discovery of useful abstractions
-   - Meta-learning across task distributions
-
-2. **Neurosymbolic Integration**
-   - Differentiable program execution
-   - Gradient-based optimization of search heuristics
-   - End-to-end learning of perception-reasoning pipelines
-
-3. **Scalability Enhancements**  
-   - Distributed search across GPU clusters
-   - Incremental learning from new tasks
-   - Transfer learning to related domains
-
-### Long-term Vision (18+ months)
-
-1. **General Abstract Reasoning**
-   - Extension beyond visual pattern recognition
-   - Integration with other reasoning benchmarks
-   - Development of unified cognitive architectures
-
-2. **Human-AI Collaboration**
-   - Interactive debugging of failed solutions
-   - Explanation generation for discovered patterns
-   - Incorporation of human feedback loops
-
-3. **Real-world Applications**
-   - Educational tools for pattern recognition
-   - Automated testing of visual interfaces
-   - Creative pattern generation systems
+This project is actively maintained. Short-term priorities include:
+- Improving heuristic efficiency and pruning.
+- Expanding DSL coverage where it materially improves success rate.
+- Hardening configuration and validation tooling.
 
 ## References and Citation
 

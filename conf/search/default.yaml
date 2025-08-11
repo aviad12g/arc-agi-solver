@@ -11,8 +11,8 @@ astar:
   
 # Beam search settings
 beam_search:
-  initial_beam_width: 64  # Initial beam width
-  adaptive_beam: true  # Enable adaptive beam width reduction
+  initial_beam_width: 32
+  adaptive_beam: true
   min_beam_width: 8  # Minimum beam width
   beam_reduction_factor: 0.7  # Factor to reduce beam when needed
   beam_reduction_threshold: 0.5  # Reduce beam when >50% nodes expanded
@@ -20,31 +20,31 @@ beam_search:
 # Heuristic system settings
 heuristics:
   # Two-tier heuristic system
-  use_tier2: true  # Enable Tier 2 heuristic
-  tier2_threshold: 5.0  # Threshold for Tier 2 activation
+  use_tier2: true
+  tier2_threshold: 5.0
 
   # Tier-2 gating (disabled by default to preserve behavior). Enable to reduce slow spikes.
   gating:
-    enable: false
-    max_blob_for_tier2: 8         # Only allow Tier2 when min(blob_count) <= this
-    min_depth_for_tier2: 2        # Only allow Tier2 when current depth >= this
-    max_tier2_calls: 50           # Per-task budget for Tier2 calls
-    dedupe_pairs: true            # Skip duplicate (grid,target) pairs
-    use_greedy_fallback_when_large: true  # Use greedy assignment if blobs exceed max
+    enable: true
+    max_blob_for_tier2: 8
+    min_depth_for_tier2: 2
+    max_tier2_calls: 20
+    dedupe_pairs: true
+    use_greedy_fallback_when_large: true
   
   # Tier 1: L₂ spectral heuristic
   tier1:
     name: "L2_Spectral"
-    max_computation_time: 0.0005  # 500µs target
-    use_d4_minimization: false  # Disable D₄ minimization for speed
+    max_computation_time: 0.001
+    use_d4_minimization: false
     cache_features: true  # Cache feature vectors
     
   # Tier 2: Hungarian assignment heuristic  
   tier2:
     name: "Hungarian_Assignment"
-    max_computation_time: 0.002  # 2ms target
-    use_scipy: true  # Use SciPy for Hungarian algorithm
-    fallback_greedy: true  # Fallback to greedy assignment
+    max_computation_time: 0.005
+    use_scipy: true
+    fallback_greedy: true
     
 # Search strategy settings
 strategy:

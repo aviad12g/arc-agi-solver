@@ -3,9 +3,9 @@
 
 # Blob labeling settings
 blob_labeling:
-  use_gpu: true  # Enable GPU acceleration when available
-  fallback_to_cpu: true  # Automatic fallback if GPU fails
-  max_labeling_time: 0.002  # ≤2ms per 30×30 grid target
+  use_gpu: false
+  fallback_to_cpu: true
+  max_labeling_time: 0.01  # advisory only
   connectivity: 4  # 4-connected or 8-connected components
   
 # Feature extraction settings
@@ -18,32 +18,32 @@ features:
   # Spectral features (Laplacian eigenvalues)
   spectral:
     enabled: true
-    dimension: 3  # λ₂, λ₃, λ₄ eigenvalues
-    eigenvalue_tolerance: 1e-3  # Stability tolerance
-    max_eigenvalue_time: 0.001  # Maximum computation time
+    dimension: 3
+    eigenvalue_tolerance: 1e-3
+    max_eigenvalue_time: 0.01
     
   # Persistent homology features
   persistence:
     enabled: true
-    dimension: 32  # 32-length landscape vectors
-    max_homology_time: 0.002  # Maximum computation time
-    cubical_complex: true  # Use cubical complexes
+    dimension: 32
+    max_homology_time: 0.05
+    cubical_complex: true
     
   # Zernike moment features
   zernike:
     enabled: true
-    dimension: 7  # Complex moment invariants
-    max_order: 4  # Maximum moment order (p+q≤4)
-    invariance_tolerance: 1e-6  # D₄ invariance tolerance
+    dimension: 7
+    max_order: 4
+    invariance_tolerance: 1e-4
     
   # Combined feature vector
-  total_dimension: 50  # Total 50D feature vectors
+  total_dimension: 50
   
 # Symmetry detection settings
 symmetry:
-  use_bitboards: true  # Use uint64 bitboard representation
-  max_detection_time: 0.00001  # ≤10µs target
-  early_exit: true  # Early exit on global symmetry detection
+  use_bitboards: true
+  max_detection_time: 0.00005
+  early_exit: true
   check_rotations: true  # Check 4 rotations
   check_reflections: true  # Check 4 reflections
   
