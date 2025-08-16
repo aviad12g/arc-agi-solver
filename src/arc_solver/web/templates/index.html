@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ARC-AGI Solver Interface</title>
+    <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+    <link rel="stylesheet" href="/static/style.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Roboto+Mono:wght@400;700&family=Source+Sans+Pro:wght@400;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <header>
+        <h1>ARC-AGI Solver</h1>
+        <p>Interactive Visualization Interface</p>
+    </header>
+    <main>
+        <div class="card" id="controls">
+            <h2>Controls</h2>
+            <div class="control-group">
+                <label for="task-file-input">Load ARC Task from File:</label>
+                <input type="file" id="task-file-input" accept=".json">
+            </div>
+            <hr class="separator">
+            <div class="control-group">
+                <label for="training-task-select">Or Load Pre-loaded Training Task:</label>
+                <select id="training-task-select"><option>Loading...</option></select>
+            </div>
+            <div class="control-group">
+                <label for="evaluation-task-select">Or Load Pre-loaded Evaluation Task:</label>
+                <select id="evaluation-task-select"><option>Loading...</option></select>
+            </div>
+            <hr class="separator">
+            <div class="control-group">
+                <button id="start-solver-btn" disabled>Solve Task</button>
+            </div>
+             <div id="status-area">
+                <p>Status: <span id="status-message">Ready</span></p>
+            </div>
+        </div>
+
+        <div class="card" id="task-display">
+            <h2>Task Visualization</h2>
+            <div id="task-grids-container">
+                <p class="placeholder">Load a task to see the training and test grids.</p>
+            </div>
+        </div>
+
+        <div class="card" id="solver-progress">
+            <h2>Live Solver Progress</h2>
+            <div id="solver-progress-container">
+                <p class="placeholder">Start the solver to see live candidate solutions.</p>
+            </div>
+        </div>
+
+        <div class="card" id="final-solution">
+            <h2>Final Solution</h2>
+            <div id="final-solution-container">
+                <p class="placeholder">The final solution will be displayed here.</p>
+            </div>
+            <!-- This container will be populated by JS when a solution is found -->
+            <div id="solution-display" class="hidden">
+                <div id="solution-program">
+                    <!-- Program steps will be listed here -->
+                </div>
+                <div id="step-through-visualizer">
+                    <div id="step-through-grid-container">
+                        <!-- The grid for the current step will be rendered here -->
+                    </div>
+                    <div id="step-through-controls">
+                        <button id="prev-step-btn" disabled>&laquo; Prev</button>
+                        <span id="step-counter">Step 0 / 0</span>
+                        <button id="next-step-btn" disabled>Next &raquo;</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </main>
+    <footer>
+        <p>ARC-AGI Solver v0.1.0</p>
+    </footer>
+    <script src="/static/main.js"></script>
+</body>
+</html>

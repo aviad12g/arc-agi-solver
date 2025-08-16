@@ -219,6 +219,27 @@ Examples:
         help='Test specific component (default: all)'
     )
     
+    # Serve command
+    serve_parser = subparsers.add_parser(
+        'serve',
+        help='Launch the interactive web GUI',
+        description='Launch the interactive web GUI for visualizing solver progress'
+    )
+
+    serve_parser.add_argument(
+        '--host',
+        type=str,
+        default='127.0.0.1',
+        help='Host to bind the server to (default: 127.0.0.1)'
+    )
+
+    serve_parser.add_argument(
+        '--port',
+        type=int,
+        default=8000,
+        help='Port to run the server on (default: 8000)'
+    )
+
     return parser
 
 
@@ -262,6 +283,8 @@ def main_cli(args: Optional[List[str]] = None) -> int:
             return commands.config_command(parsed_args)
         if parsed_args.command == 'test':
             return commands.test_command(parsed_args)
+        if parsed_args.command == 'serve':
+            return commands.serve_command(parsed_args)
 
         logger.error(f"Unknown command: {parsed_args.command}")
         return 1

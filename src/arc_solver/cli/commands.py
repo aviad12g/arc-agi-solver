@@ -1,5 +1,6 @@
 """CLI command implementations."""
 
+import uvicorn
 import json
 import logging
 import time
@@ -107,13 +108,14 @@ class ARCSolver:
         except Exception:
             pass
     
-    def solve_task(self, task, timeout: float = 30.0, use_multi_example: bool = True) -> Dict[str, Any]:
+    def solve_task(self, task, timeout: float = 30.0, use_multi_example: bool = True, update_callback=None) -> Dict[str, Any]:
         """Solve a single ARC task.
         
         Args:
             task: ARC task object
             timeout: Timeout in seconds
             use_multi_example: Whether to use multi-example validation
+            update_callback: Optional callback for real-time updates
             
         Returns:
             Dictionary with solution results
@@ -271,12 +273,12 @@ class ARCSolver:
                 if use_multi_example and len(train_examples) > 1:
                     # Use multi-example search for better accuracy
                     logger.info(f"Using multi-example search with {len(train_examples)} training examples")
-                    search_result = self.searcher.search_multi_example(train_examples)
+                    search_result = self.searcher.search_multi_example(train_examples, update_callback=update_callback)
                 else:
                     # Fallback to single-example search
                     logger.info("Using single-example search")
                     input_grid, output_grid = train_examples[0]
-                    search_result = self.searcher.search(input_grid, output_grid)
+                    search_result = self.searcher.search(input_grid, output_grid, update_callback=update_callback)
                 
                 computation_time = time.perf_counter() - start_time
                 
@@ -763,3 +765,24 @@ def test_command(args) -> int:
     except Exception as e:
         logger.error(f"Test command failed: {e}")
         return 1
+
+
+def serve_command(args) -> int:
+    """Handle serve command for web GUI.
+
+    Args:
+        args: Parsed command line arguments
+
+    Returns:
+        Exit code
+    """
+    logger.info(f"Starting web server at http://{args.host}:{args.port}")
+    try:
+        from arc_solver.web.server import app as web_app
+    except ImportError as e:
+        logger.error("Could not import web application. Please ensure web dependencies are installed.")
+        logger.error(f"ImportError: {e}")
+        return 1
+
+    uvicorn.run(web_app, host=args.host, port=args.port)
+    return 0
