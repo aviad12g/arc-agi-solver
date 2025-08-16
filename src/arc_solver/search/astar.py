@@ -782,12 +782,13 @@ class AStarSearcher:
         
         return stats
     
-    def search(self, initial_grid: np.ndarray, target_grid: np.ndarray) -> SearchResult:
+    def search(self, initial_grid: np.ndarray, target_grid: np.ndarray, update_callback=None) -> SearchResult:
         """Search for optimal DSL program to transform initial_grid to target_grid.
         
         Args:
             initial_grid: Starting grid state
             target_grid: Goal grid state
+            update_callback: Optional callback for real-time updates
             
         Returns:
             SearchResult with program and statistics
@@ -806,10 +807,47 @@ class AStarSearcher:
             self._warm_pattern_cache(target_grid)
         
         try:
+            def final_result_handler(result: SearchResult):
+                if update_callback:
+                    try:
+                        # --- New logic for step-through ---
+                        steps = []
+                        if result.success and result.program:
+                            current_grid = initial_grid.copy()
+                            steps.append({
+                                'operation': 'Initial State',
+                                'grid': current_grid.tolist()
+                            })
+                            for op in result.program.operations:
+                                next_grid = self.dsl_engine.apply_operation(current_grid, op)
+                                steps.append({
+                                    'operation': str(op),
+                                    'grid': next_grid.tolist()
+                                })
+                                current_grid = next_grid
+
+                        payload = {
+                            'success': result.success,
+                            'program_dict': result.program.to_dict() if result.program else None,
+                            'steps': steps,
+                            'final_grid': result.final_grid.tolist() if result.final_grid is not None else None,
+                            'termination_reason': result.termination_reason,
+                            'computation_time': result.computation_time,
+                            'stats': {
+                                'nodes_expanded': result.nodes_expanded,
+                                'nodes_generated': result.nodes_generated,
+                                'max_depth_reached': result.max_depth_reached
+                            }
+                        }
+                        update_callback('solver_finished', payload)
+                    except Exception as e:
+                        logger.warning(f"Failed to send final result via callback: {e}")
+                return result
+
             # Check if initial grid already matches target
             if np.array_equal(initial_grid, target_grid):
                 computation_time = time.perf_counter() - start_time
-                return SearchResult(
+                return final_result_handler(SearchResult(
                     success=True,
                     program=DSLProgram([]),  # Empty program
                     final_grid=initial_grid.copy(),
@@ -817,7 +855,7 @@ class AStarSearcher:
                     nodes_generated=1,
                     computation_time=computation_time,
                     termination_reason="initial_match"
-                )
+                ))
             
             # Initialize search
             # If the time budget is extremely tight, skip expensive heuristic init
@@ -872,6 +910,30 @@ class AStarSearcher:
                     heapq.heapify(open_queue)
                     self.statistics.nodes_pruned += len(open_queue) - self.beam_width_used
                 
+                # --- Real-time Update Callback ---
+                if update_callback:
+                    try:
+                        # Prepare data for the frontend (top 5 candidates)
+                        top_candidates = heapq.nsmallest(min(len(open_queue), 5), open_queue)
+                        candidates_data = [{
+                            'program': str(node.program),
+                            'grid': node.grid.tolist(),
+                            'cost': node.cost,
+                            'heuristic': round(node.heuristic, 4),
+                            'f_score': round(node.f_score, 4)
+                        } for node in top_candidates]
+
+                        # Prepare progress stats
+                        progress_stats = {
+                            'nodes_expanded': self.statistics.nodes_expanded,
+                            'nodes_generated': self.statistics.nodes_generated,
+                            'beam_width': self.beam_width_used,
+                            'queue_size': len(open_queue)
+                        }
+                        update_callback('progress_update', {'candidates': candidates_data, 'stats': progress_stats})
+                    except Exception as e:
+                        logger.warning(f"Failed to execute update_callback: {e}")
+
                 # Get best node from open queue
                 current_node = heapq.heappop(open_queue)
                 # Early timeout guard before any heavy work
@@ -886,9 +948,9 @@ class AStarSearcher:
                 # Check for goal state
                 if np.array_equal(current_node.grid, target_grid):
                     computation_time = time.perf_counter() - start_time
-                    return self._create_success_result(
+                    return final_result_handler(self._create_success_result(
                         current_node, computation_time, "goal_reached"
-                    )
+                    ))
                 
                 # Skip if already explored (duplicate detection)
                 if self.config.duplicate_detection:
@@ -974,21 +1036,21 @@ class AStarSearcher:
                 termination_reason = "unknown"
             
             # Return best partial result
-            return self._create_partial_result(
+            return final_result_handler(self._create_partial_result(
                 best_node, computation_time, termination_reason
-            )
+            ))
             
         except Exception as e:
             computation_time = time.perf_counter() - start_time
             logger.error(f"A* search failed with error: {e}")
             
-            return SearchResult(
+            return final_result_handler(SearchResult(
                 success=False,
                 nodes_expanded=self.statistics.nodes_expanded,
                 nodes_generated=self.nodes_generated,
                 computation_time=computation_time,
                 termination_reason=f"error: {str(e)}"
-            )
+            ))
     
     def _expand_node(self, node: SearchNode, target_grid: np.ndarray, deadline: float) -> List[SearchNode]:
         """Expand a search node by applying all possible DSL operations.
