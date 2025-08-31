@@ -1,0 +1,19 @@
+# Development Configuration
+# Settings for development, testing, and debugging
+
+# Testing configuration
+testing:
+  deterministic_mode: false  # Set seeds for reproducible results
+  random_seed: 42  # Base seed for deterministic testing
+
+# Development features
+features:
+  enable_debug_logging: false  # Extra verbose logging
+  save_intermediate_results: false  # Save intermediate computation results
+  profile_performance: false  # Enable performance profiling
+
+# Experimental features (use with caution)
+experimental:
+  enable_new_heuristics: false  # Enable experimental heuristic improvements
+  enable_parallel_search: false  # Enable experimental parallel search
+  enable_ml_guidance: false  # Enable experimental ML-guided search

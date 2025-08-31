@@ -911,7 +911,30 @@ class HeuristicSystem:
             if pair_key is not None:
                 self._seen_pair_keys.add(pair_key)
             
-            # Return the more accurate Tier 2 result
+            # Combine with PDB lower bound via max (still admissible) if enabled
+            try:
+                from arc_solver.config import get_config as _get_cfg
+                cfg = _get_cfg()
+                use_pdb = True
+                if cfg is not None and 'search' in cfg and 'advanced' in cfg.search and 'pdb' in cfg.search.advanced:
+                    use_pdb = bool(cfg.search.advanced.pdb.get('enabled', True))
+            except Exception:
+                use_pdb = True
+            if use_pdb:
+                try:
+                    from arc_solver.search.pattern_db import d4_exact_lb
+                    pdb_lb = float(d4_exact_lb(current_grid, target_grid))
+                    if pdb_lb > tier2_result.value:
+                        tier2_result = HeuristicResult(
+                            value=pdb_lb,
+                            computation_time=tier1_result.computation_time + tier2_result.computation_time,
+                            features_computed=tier2_result.features_computed,
+                            error=tier2_result.error,
+                        )
+                except Exception:
+                    pass
+
+            # Return the (possibly tightened) Tier 2 result
             return HeuristicResult(
                 value=tier2_result.value,
                 computation_time=tier1_result.computation_time + tier2_result.computation_time,
@@ -919,6 +942,29 @@ class HeuristicSystem:
                 error=tier2_result.error
             )
         
+        # Combine Tier 1 with PDB lower bound via max (still admissible) if enabled
+        try:
+            from arc_solver.config import get_config as _get_cfg
+            cfg = _get_cfg()
+            use_pdb = True
+            if cfg is not None and 'search' in cfg and 'advanced' in cfg.search and 'pdb' in cfg.search.advanced:
+                use_pdb = bool(cfg.search.advanced.pdb.get('enabled', True))
+        except Exception:
+            use_pdb = True
+        if use_pdb:
+            try:
+                from arc_solver.search.pattern_db import d4_exact_lb
+                pdb_lb = float(d4_exact_lb(current_grid, target_grid))
+                if pdb_lb > tier1_result.value:
+                    tier1_result = HeuristicResult(
+                        value=pdb_lb,
+                        computation_time=tier1_result.computation_time,
+                        features_computed=tier1_result.features_computed,
+                        error=tier1_result.error,
+                    )
+            except Exception:
+                pass
+
         return tier1_result
     
     def get_stats(self) -> Dict[str, Any]:

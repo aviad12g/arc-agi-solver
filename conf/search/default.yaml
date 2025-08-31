@@ -70,11 +70,51 @@ monitoring:
 advanced:
   # Node ordering
   tie_breaking_strategy: "cost_then_depth"  # cost < depth for tie-breaking
-  
+
   # Memory management
   max_memory_usage: 1.0  # Maximum memory usage in GB
   garbage_collect_frequency: 1000  # GC every N node expansions
-  
+
+  # UNSAT cache configuration
+  unsat_cache:
+    enabled: true  # Enable UNSAT caching for proven impossibilities
+    signatures_file: "expanded_unsat_signatures.jsonl"  # Path to JSONL file with pre-computed signatures
+
+  # Program canonicalization configuration
+  canonicalization:
+    enabled: true  # Enable program canonicalization via rewrite rules
+    saturation_enabled: false  # Enable e-graph style saturation (fixed-point)
+    validate_smt: false       # Optional SMT validation of rewrites (future)
+
+  # Retrieval persistence (optional)
+  retrieval:
+    preload_file: "retrieval_store.jsonl"  # JSONL with {signature, program} - same as store_file for reuse
+    store_file: "retrieval_store.jsonl"    # Path to append newly found solutions
+
+  # Dead-end predictor configuration
+  deadend_predictor:
+    enabled: true  # Enable dead-end prediction gating (conservative)
+    model_file: "enhanced_deadend_model.json"  # Path to trained dead-end predictor model
+
+  # Pattern database heuristic configuration
+  pdb:
+    enabled: true  # Enable PDB lower bound in heuristics
+
   # Debugging
   debug_mode: false  # Enable debug mode (slower)
   save_failed_searches: false  # Save failed searches for analysis
+
+# Portfolio scheduler (optional)
+portfolio:
+  enabled: true
+  budgets:
+    retrieval: 0.2       # seconds - increased for real ARC task lookups
+    templates: 0.5       # increased for complex pattern matching
+    object_level: 0.5    # increased for object manipulation synthesis
+    cegis: 0.5           # increased for program synthesis attempts
+    astar: 0.0           # rely on searcher internal timeout
+    llm_guided: 0.0      # rely on searcher internal timeout
+  hazard_scheduling: true   # Reorder lanes by learned hazard/efficiency metrics
+  record_metrics: true       # Record lane metrics across runs
+  metrics_file: "portfolio_metrics.jsonl"  # JSONL file to append per-task lane metrics
+  tie_breaking_strategy: "calibrated_floor"  # Use calibrated value for tie-breaking

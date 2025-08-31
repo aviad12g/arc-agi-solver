@@ -108,6 +108,32 @@ Examples:
         action='store_true',
         help='Disable multi-example validation (use only first training example)'
     )
+
+    # LLM options
+    solve_parser.add_argument(
+        '--llm',
+        dest='llm_enabled',
+        action='store_true',
+        help='Enable LLM-guided search (priority-boost; preserves admissibility)'
+    )
+    solve_parser.add_argument(
+        '--llm-model',
+        type=str,
+        default='local/mock',
+        help='LLM model name (transformers hub id or local path)'
+    )
+    solve_parser.add_argument(
+        '--llm-proposals',
+        type=int,
+        default=2,
+        help='Number of LLM proposals to generate'
+    )
+    solve_parser.add_argument(
+        '--llm-priority-boost',
+        type=float,
+        default=1.0,
+        help='Tie-break priority boost factor for LLM-matching ops'
+    )
     
     # Batch command
     batch_parser = subparsers.add_parser(
@@ -165,6 +191,32 @@ Examples:
         '--disable-multi-example',
         action='store_true',
         help='Disable multi-example validation for batch processing'
+    )
+
+    # LLM options for batch mode
+    batch_parser.add_argument(
+        '--llm',
+        dest='llm_enabled',
+        action='store_true',
+        help='Enable LLM-guided search for batch mode'
+    )
+    batch_parser.add_argument(
+        '--llm-model',
+        type=str,
+        default='local/mock',
+        help='LLM model name (transformers hub id or local path)'
+    )
+    batch_parser.add_argument(
+        '--llm-proposals',
+        type=int,
+        default=2,
+        help='Number of LLM proposals to generate per task'
+    )
+    batch_parser.add_argument(
+        '--llm-priority-boost',
+        type=float,
+        default=1.0,
+        help='Tie-break priority boost factor for LLM-matching ops'
     )
     
     # Config command

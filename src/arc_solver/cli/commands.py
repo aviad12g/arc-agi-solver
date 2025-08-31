@@ -18,13 +18,16 @@ from arc_solver.config import load_config, get_config, validate_config, ConfigVa
 from arc_solver.caching import create_cache_manager
 from arc_solver.search.astar import create_astar_searcher
 from arc_solver.search.heuristics import create_heuristic_system
-from arc_solver.reasoning.dsl_engine import DSLEngine
+from arc_solver.reasoning.dsl_engine import DSLEngine, DSLProgram
 from arc_solver.perception.blob_labeling import create_blob_labeler
 from arc_solver.perception.features import create_orbit_signature_computer
 from arc_solver.solver.formula_layer.solver import solve_with_templates
 from arc_solver.reasoning.smt_cegis import try_cegis_solve
 from arc_solver.reasoning.object_synthesis import synthesize_object_level_program
 from arc_solver.reasoning.ensemble import select_best_program
+from arc_solver.search.llm_integration import LLMGuidedAStarSearcher
+from arc_solver.llm.llm_proposer import LLMProposer
+from arc_solver.search.retrieval import RetrievalIndex, task_signature
 
 from .utils import (
     load_task_from_file, save_results, find_task_files, format_duration,
@@ -76,6 +79,46 @@ class ARCSolver:
             max_nodes_expanded=search_config.get('astar', {}).get('max_nodes_expanded', 600),
             beam_width=search_config.get('beam_search', {}).get('initial_beam_width', 64)
         )
+
+        # Retrieval index for cross-task program reuse (in-run)
+        self.retrieval = RetrievalIndex()
+        try:
+            adv = self.config.get('search', {}).get('advanced', {})
+            retr = adv.get('retrieval', {}) if isinstance(adv, dict) else {}
+            store_file = retr.get('store_file')
+            preload_file = retr.get('preload_file')
+            if store_file:
+                self.retrieval.attach_store(str(store_file))
+            if preload_file:
+                loaded = self.retrieval.load_from_jsonl(str(preload_file))
+                if loaded:
+                    logger.info(f"Loaded {loaded} programs into retrieval index from {preload_file}")
+        except Exception:
+            pass
+
+        # Initialize optional LLM components if enabled
+        try:
+            llm_cfg = self.config.get('llm', {})
+            si = llm_cfg.get('search_integration', {}) if isinstance(llm_cfg, dict) else {}
+            self.llm_enabled = bool(si.get('enabled', False))
+            self.llm_priority_boost = float(si.get('priority_boost', 1.0))
+            model_cfg = llm_cfg.get('model', {}) if isinstance(llm_cfg, dict) else {}
+            self.llm_model_name = str(model_cfg.get('name', 'local/mock'))
+            prop_cfg = llm_cfg.get('proposals', {}) if isinstance(llm_cfg, dict) else {}
+            self.llm_num_proposals = int(prop_cfg.get('num_proposals', 2))
+        except Exception:
+            self.llm_enabled = False
+            self.llm_priority_boost = 1.0
+            self.llm_model_name = 'local/mock'
+            self.llm_num_proposals = 2
+
+        self.llm_proposer: Optional[LLMProposer] = None
+        if self.llm_enabled:
+            try:
+                self.llm_proposer = LLMProposer()
+            except Exception:
+                logger.warning("Failed to initialize LLM proposer; disabling LLM integration.")
+                self.llm_enabled = False
         
         logger.info("ARC solver initialized successfully")
 
@@ -211,6 +254,12 @@ class ARCSolver:
                             for test_input in test_inputs:
                                 pred, _ = self.dsl_engine.execute_program(program, test_input)
                                 test_predictions.append(pred.tolist())
+                            # Learn: remember this program for similar tasks
+                            try:
+                                sig = task_signature(train_examples)
+                                self.retrieval.add(sig, program)
+                            except Exception:
+                                pass
                             return {
                                 'success': True,
                                 'program': program.to_dict(),
@@ -253,6 +302,12 @@ class ARCSolver:
                         for test_input in test_inputs:
                             pred, _ = self.dsl_engine.execute_program(best, test_input)
                             test_predictions.append(pred.tolist())
+                        # Learn: remember best program
+                        try:
+                            sig = task_signature(train_examples)
+                            self.retrieval.add(sig, best)
+                        except Exception:
+                            pass
                         return {
                             'success': True,
                             'program': best.to_dict(),
@@ -269,12 +324,133 @@ class ARCSolver:
                 except Exception:
                     pass
 
+                # Portfolio scheduler (optional)
+                try:
+                    portfolio_cfg = self.config.get('search', {}).get('portfolio', {})
+                    if bool(portfolio_cfg.get('enabled', False)):
+                        from arc_solver.search.portfolio import PortfolioRunner
+                        budgets = dict(portfolio_cfg.get('budgets', {}))
+                        runner = PortfolioRunner(self.dsl_engine, self.searcher, self.llm_proposer if self.llm_enabled else None, self.retrieval, logger)
+                        maybe = runner.run(train_examples, test_inputs, getattr(task, 'task_id', None), budgets, use_multi_example, self.llm_priority_boost)
+                        if maybe is not None:
+                            maybe['computation_time'] = time.perf_counter() - start_time
+                            # Learn: remember
+                            try:
+                                if maybe.get('success') and 'program' in maybe:
+                                    from arc_solver.search.retrieval import task_signature
+                                    sig = task_signature(train_examples)
+                                    self.retrieval.add(sig, DSLProgram.from_dict(maybe['program']))
+                            except Exception:
+                                pass
+                            return maybe
+                except Exception:
+                    pass
+
+                # Micro-oracle exact program (when portfolio disabled): try quick families first
+                try:
+                    from arc_solver.search.micro_oracles import run_oracles
+                    a, b = train_examples[0]
+                    o = run_oracles(a, b)
+                    if o.program is not None:
+                        test_predictions = []
+                        for ti in test_inputs:
+                            pred, _ = self.dsl_engine.execute_program(o.program, ti)
+                            test_predictions.append(pred.tolist())
+                        return {
+                            'success': True,
+                            'program': o.program.to_dict(),
+                            'predictions': test_predictions,
+                            'search_stats': {
+                                'nodes_expanded': 0,
+                                'nodes_generated': 0,
+                                'max_depth_reached': len(o.program.operations),
+                                'termination_reason': 'oracle_solution'
+                            },
+                            'computation_time': time.perf_counter() - start_time,
+                            'task_id': getattr(task, 'task_id', None)
+                        }
+                except Exception:
+                    pass
+
+                # Retrieval step: try previously seen solutions matching invariant signatures
+                try:
+                    sig = task_signature(train_examples)
+                    candidates = self.retrieval.get(sig)
+                    if candidates:
+                        logger.info(f"Trying {len(candidates)} retrieved program(s) before search")
+                        valid = []
+                        for prog in candidates:
+                            try:
+                                ok = True
+                                for a, b in train_examples:
+                                    pred, _ = self.dsl_engine.execute_program(prog, a)
+                                    if not np.array_equal(pred, b):
+                                        ok = False
+                                        break
+                                if ok:
+                                    valid.append(prog)
+                            except Exception:
+                                continue
+                        if valid:
+                            best = select_best_program(self.dsl_engine, valid, train_examples) or valid[0]
+                            test_predictions = []
+                            for test_input in test_inputs:
+                                pred, _ = self.dsl_engine.execute_program(best, test_input)
+                                test_predictions.append(pred.tolist())
+                            return {
+                                'success': True,
+                                'program': best.to_dict(),
+                                'predictions': test_predictions,
+                                'search_stats': {
+                                    'nodes_expanded': 0,
+                                    'nodes_generated': 0,
+                                    'max_depth_reached': len(best.operations),
+                                    'termination_reason': 'retrieval_solution'
+                                },
+                                'computation_time': time.perf_counter() - start_time,
+                                'task_id': getattr(task, 'task_id', None)
+                            }
+                except Exception:
+                    pass
+
                 # Choose search method based on configuration
-                if use_multi_example and len(train_examples) > 1:
+                if self.llm_enabled:
+                    # LLM-guided A*: generate proposals then run guided search
+                    logger.info("Using LLM-guided search")
+                    try:
+                        # Prepare blobs for proposer from the first example
+                        primary_input, primary_target = train_examples[0]
+                        blob_labeler = create_blob_labeler(use_gpu=False)
+                        in_blobs, _ = blob_labeler.label_blobs(primary_input)
+                        out_blobs, _ = blob_labeler.label_blobs(primary_target)
+                        prop_result = self.llm_proposer.generate_proposals(
+                            primary_input, primary_target, in_blobs, out_blobs
+                        ) if self.llm_proposer else None
+                        llm_programs = prop_result.proposals if (prop_result and prop_result.success) else []
+                        guided = LLMGuidedAStarSearcher(
+                            base_searcher=self.searcher,
+                            llm_proposals=llm_programs,
+                            priority_boost=self.llm_priority_boost,
+                            dsl_engine=self.dsl_engine,
+                        )
+                        # Prefer multi-example fitness if available
+                        train_pairs = train_examples if use_multi_example and len(train_examples) > 1 else None
+                        search_result = guided.search(primary_input, primary_target, train_pairs=train_pairs)
+                    except Exception as e:
+                        logger.warning(f"LLM-guided search failed; falling back to standard search: {e}")
+                        # Fallback to standard path below
+                        self.llm_enabled = False
+                        search_result = None
+
+                    if search_result is None:
+                        # Continue with standard path
+                        pass
+
+                if not self.llm_enabled and use_multi_example and len(train_examples) > 1:
                     # Use multi-example search for better accuracy
                     logger.info(f"Using multi-example search with {len(train_examples)} training examples")
                     search_result = self.searcher.search_multi_example(train_examples, update_callback=update_callback)
-                else:
+                elif not self.llm_enabled:
                     # Fallback to single-example search
                     logger.info("Using single-example search")
                     input_grid, output_grid = train_examples[0]
@@ -283,6 +459,13 @@ class ARCSolver:
                 computation_time = time.perf_counter() - start_time
                 
                 if search_result.success:
+                    # Learn: record retrieval signature to reuse this program later in-run
+                    try:
+                        sig = task_signature(train_examples)
+                        if search_result.program is not None:
+                            self.retrieval.add(sig, search_result.program)
+                    except Exception:
+                        pass
                     # Apply found program to test input
                     test_predictions = []
                     for test_input in test_inputs:
@@ -427,6 +610,16 @@ def solve_command(args) -> int:
         if args.no_cache:
             config_overrides.append("system.caching.file_cache.enabled=false")
             config_overrides.append("system.caching.redis.enabled=false")
+
+        # LLM overrides
+        if getattr(args, 'llm_enabled', False):
+            config_overrides.append("llm.search_integration.enabled=true")
+            if getattr(args, 'llm_model', None):
+                config_overrides.append(f"llm.model.name={args.llm_model}")
+            if getattr(args, 'llm_proposals', None) is not None:
+                config_overrides.append(f"llm.proposals.num_proposals={args.llm_proposals}")
+            if getattr(args, 'llm_priority_boost', None) is not None:
+                config_overrides.append(f"llm.search_integration.priority_boost={args.llm_priority_boost}")
         
         # Add global config overrides
         if hasattr(args, 'config') and args.config:
@@ -522,6 +715,16 @@ def batch_command(args) -> int:
         # Add global config overrides
         if hasattr(args, 'config') and args.config:
             config_overrides.append(args.config)
+
+        # LLM overrides for batch
+        if getattr(args, 'llm_enabled', False):
+            config_overrides.append("llm.search_integration.enabled=true")
+            if getattr(args, 'llm_model', None):
+                config_overrides.append(f"llm.model.name={args.llm_model}")
+            if getattr(args, 'llm_proposals', None) is not None:
+                config_overrides.append(f"llm.proposals.num_proposals={args.llm_proposals}")
+            if getattr(args, 'llm_priority_boost', None) is not None:
+                config_overrides.append(f"llm.search_integration.priority_boost={args.llm_priority_boost}")
         
         # Initialize solver
         logger.info("Initializing ARC solver...")

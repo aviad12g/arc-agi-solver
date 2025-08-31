@@ -182,6 +182,79 @@ python scripts/validate_accuracy_performance.py --quick
 python scripts/test_cuda_blob_labeling.py
 ```
 
+### Performance Benchmarks
+
+#### Deterministic E2E Benchmark
+```bash
+# Run quick benchmark with synthetic tasks
+python scripts/benchmark_e2e_deterministic.py --quick
+
+# Full benchmark with real ARC tasks
+python scripts/benchmark_e2e_deterministic.py --input arc-agi_training_challenges.json
+
+# Custom configuration benchmark
+python scripts/benchmark_e2e_deterministic.py \
+    --config search.beam_search.initial_beam_width=32 \
+    --max-tasks 50 \
+    --output benchmark_results.json
+```
+
+**Expected Output:**
+- JSON report with median solve time, success rate, and performance metrics
+- Comparison against baseline performance
+- Detailed breakdown by task difficulty and category
+
+#### UNSAT Oracle Seeding
+```bash
+# Generate UNSAT signatures from synthetic examples
+python scripts/unsat_oracle_seed.py --synthetic-only
+
+# Load signatures at solver initialization
+python scripts/unsat_oracle_seed.py --output unsat_signatures.jsonl
+
+# Use in solver with UNSAT cache enabled
+python -m arc_solver.cli.main solve task.json \
+    search.advanced.unsat_cache.enabled=true \
+    search.advanced.unsat_cache.signatures_file=unsat_signatures.jsonl
+```
+
+#### Accuracy and Performance Validation
+```bash
+# Validate accuracy on ARC dataset
+python scripts/validate_accuracy_performance.py --quick
+
+# Full validation with timing analysis
+python scripts/validate_accuracy_performance.py \
+    --input arc-agi_evaluation_challenges.json \
+    --timeout 30 \
+    --report-interval 10
+```
+
+#### UNSAT Cache Seeding and Configuration
+```bash
+# Generate UNSAT signatures from synthetic test cases
+python scripts/unsat_oracle_seed.py --synthetic-only --output unsat_signatures.jsonl
+
+# Enable UNSAT cache in solver configuration
+python -m arc_solver.cli.main solve task.json \
+    search.advanced.unsat_cache.enabled=true \
+    search.advanced.unsat_cache.signatures_file=unsat_signatures.jsonl
+
+# Enable dead-end predictor gating (conservative)
+python -m arc_solver.cli.main solve task.json \
+    search.advanced.deadend_predictor.enabled=true
+
+# Enable PDB lower bound in heuristics (default: enabled)
+python -m arc_solver.cli.main solve task.json \
+    search.advanced.pdb.enabled=true
+```
+
+**UNSAT Cache Flow:**
+1. Run oracle seeder to detect simple impossibilities → `unsat_signatures.jsonl`
+2. Enable UNSAT cache in Hydra config → `search.advanced.unsat_cache.enabled=true`
+3. Set signatures file path → `search.advanced.unsat_cache.signatures_file=unsat_signatures.jsonl`
+4. Solver loads signatures at startup and skips known-impossible states during search
+
 ### Command-Line Interface
 
 #### Single Task Solving
@@ -200,6 +273,42 @@ python -m arc_solver.cli.main submit \
     --input arc-agi_evaluation_challenges.json \
     --output submission.json \
     --timeout 15
+```
+
+#### LLM-Guided Solving
+```bash
+# Enable LLM with default settings
+python -m arc_solver.cli.main solve task.json --llm
+
+# Custom LLM configuration
+python -m arc_solver.cli.main solve task.json \
+    --llm \
+    --llm-model "microsoft/DialoGPT-medium" \
+    --llm-proposals 3 \
+    --llm-priority-boost 2.0
+
+# Batch processing with LLM
+python -m arc_solver.cli.main batch input_dir/ \
+    --llm \
+    --llm-model "local/llama-7b" \
+    --threads 2
+```
+
+#### Advanced Configuration Overrides
+```bash
+# Enable UNSAT cache for performance
+python -m arc_solver.cli.main solve task.json \
+    search.advanced.unsat_cache.enabled=true \
+    search.advanced.unsat_cache.signatures_file=unsat_signatures.jsonl
+
+# Disable canonicalization
+python -m arc_solver.cli.main solve task.json \
+    search.advanced.canonicalization.enabled=false
+
+# Custom beam search parameters
+python -m arc_solver.cli.main solve task.json \
+    search.beam_search.initial_beam_width=64 \
+    search.beam_search.adaptive_beam=false
 ```
 
 ### Configuration

@@ -47,6 +47,11 @@ def solve_with_templates(
     if prog is not None and _validate_on_all_examples(engine, prog, train_pairs):
         return prog
 
+    # Try exact D4 with exact color map (pixel-wise consistent mapping)
+    prog = _template_d4_with_exact_color_map(train_pairs, engine)
+    if prog is not None and _validate_on_all_examples(engine, prog, train_pairs):
+        return prog
+
     # Try centroid-translation of dominant shapes
     prog = _template_translate_matched_shapes(train_pairs, engine)
     if prog is not None and _validate_on_all_examples(engine, prog, train_pairs):
@@ -74,6 +79,11 @@ def solve_with_templates(
 
     # Try majority color fill when output is a constant grid
     prog = _template_majority_fill(train_pairs, engine)
+    if prog is not None and _validate_on_all_examples(engine, prog, train_pairs):
+        return prog
+
+    # Try pure color permutation mapping without geometry
+    prog = _template_color_permutation_only(train_pairs, engine)
     if prog is not None and _validate_on_all_examples(engine, prog, train_pairs):
         return prog
 
@@ -158,6 +168,90 @@ def _template_d4_with_color_rank(
         program_ops.append(DSLOperation("MapColors", {"perm": best_perm}))
 
     return DSLProgram(program_ops)
+
+
+def _extract_color_mapping(src: np.ndarray, dst: np.ndarray) -> Optional[dict]:
+    """Extract a one-to-one color mapping f such that f(src) == dst.
+
+    Returns a dict {old_color: new_color} if consistent mapping exists; otherwise None.
+    Background (0) is allowed to map to itself or another value as derived from data.
+    """
+    if src.shape != dst.shape:
+        return None
+    mapping: dict = {}
+    # For each pixel, enforce mapping consistency
+    it = np.nditer([src, dst], flags=['multi_index'])
+    for s, t in it:
+        s_val = int(s)
+        t_val = int(t)
+        if s_val in mapping and mapping[s_val] != t_val:
+            return None
+        mapping[s_val] = t_val
+    return mapping
+
+
+def _template_color_permutation_only(
+    train_pairs: List[Tuple[np.ndarray, np.ndarray]], engine: DSLEngine
+) -> Optional[DSLProgram]:
+    """If all pairs differ only by a consistent color permutation, return MapColorsPermutation."""
+    if not train_pairs:
+        return None
+    # Derive mapping from first pair
+    m0 = _extract_color_mapping(train_pairs[0][0], train_pairs[0][1])
+    if not m0:
+        return None
+    # Validate consistency across all pairs
+    for src, dst in train_pairs[1:]:
+        m = _extract_color_mapping(src, dst)
+        if not m:
+            return None
+        # Must match exactly the initial mapping for robustness
+        if any(m.get(k, None) != v for k, v in m0.items()):
+            return None
+    return DSLProgram([DSLOperation("MapColorsPermutation", {"perm_map": m0})])
+
+
+def _template_d4_with_exact_color_map(
+    train_pairs: List[Tuple[np.ndarray, np.ndarray]], engine: DSLEngine
+) -> Optional[DSLProgram]:
+    """Attempt D4 transform followed by exact color mapping (pixel-wise consistent).
+
+    Requires a single D4 op and a single color mapping to work for all pairs.
+    """
+    d4_ops = [
+        ("IDENT", []),
+        ("Rotate90", [DSLOperation("Rotate90", {})]),
+        ("Rotate180", [DSLOperation("Rotate180", {})]),
+        ("Rotate270", [DSLOperation("Rotate90", {}), DSLOperation("Rotate90", {}), DSLOperation("Rotate90", {})]),
+        ("ReflectH", [DSLOperation("ReflectH", {})]),
+        ("ReflectV", [DSLOperation("ReflectV", {})]),
+    ]
+
+    def color_map_after_d4(pair: Tuple[np.ndarray, np.ndarray], key: str) -> Optional[dict]:
+        src, dst = pair
+        src_t = _apply_d4_numpy(src, key)
+        return _extract_color_mapping(src_t, dst)
+
+    for key, ops in d4_ops:
+        mapping_all: Optional[dict] = None
+        ok = True
+        for pair in train_pairs:
+            m = color_map_after_d4(pair, key)
+            if not m:
+                ok = False
+                break
+            if mapping_all is None:
+                mapping_all = m
+            else:
+                if any(mapping_all.get(k, None) != v for k, v in m.items()):
+                    ok = False
+                    break
+        if ok and mapping_all is not None:
+            program_ops = list(ops)
+            if mapping_all:
+                program_ops.append(DSLOperation("MapColorsPermutation", {"perm_map": mapping_all}))
+            return DSLProgram(program_ops)
+    return None
 
 
 def _template_translate_matched_shapes(
@@ -353,5 +447,4 @@ def _apply_d4_numpy(grid: np.ndarray, key: str) -> np.ndarray:
     if key == "ReflectV":
         return np.flipud(grid)
     return grid.copy()
-
 

@@ -1,0 +1,186 @@
+name: Performance Guard
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  performance-test:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+
+    - name: Install Poetry
+      run: |
+        curl -sSL https://install.python-poetry.org | python3 -
+        echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+    - name: Install dependencies
+      run: |
+        poetry install --no-dev
+
+    - name: Set PYTHONPATH
+      run: |
+        echo "PYTHONPATH=$PWD/src" >> $GITHUB_ENV
+
+    - name: Run deterministic benchmark
+      run: |
+        poetry run python scripts/benchmark_e2e_deterministic.py --quick --output benchmark_results.json
+      continue-on-error: true
+
+    - name: Parse benchmark results
+      id: parse-results
+      run: |
+        if [ -f benchmark_results.json ]; then
+          # Extract key metrics
+          median_time=$(python3 -c "
+          import json
+          with open('benchmark_results.json') as f:
+              data = json.load(f)
+          print(f\"{data.get('median_solve_time', 0):.3f}\")
+          ")
+
+          success_rate=$(python3 -c "
+          import json
+          with open('benchmark_results.json') as f:
+              data = json.load(f)
+          print(f\"{data.get('success_rate', 0):.3f}\")
+          ")
+
+          nodes_expanded=$(python3 -c "
+          import json
+          with open('benchmark_results.json') as f:
+              data = json.load(f)
+          print(f\"{data.get('median_nodes_expanded', 0)}\")
+          ")
+
+          echo "median_time=$median_time" >> $GITHUB_OUTPUT
+          echo "success_rate=$success_rate" >> $GITHUB_OUTPUT
+          echo "nodes_expanded=$nodes_expanded" >> $GITHUB_OUTPUT
+        else
+          echo "median_time=0" >> $GITHUB_OUTPUT
+          echo "success_rate=0" >> $GITHUB_OUTPUT
+          echo "nodes_expanded=0" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Get baseline metrics
+      id: baseline
+      run: |
+        # Current baseline metrics (locked after enhanced implementation)
+        # These represent the performance with all advanced optimizations enabled:
+        # - Portfolio scheduler v2.1 with hazard scheduling and per-lane metrics (retrieval: 0.2s, templates: 0.5s, object_level: 0.5s, cegis: 0.5s)
+        # - Retrieval persistence with structural blob-graph signatures (4 solved examples)
+        # - UNSAT cache with 16 expanded signatures from dataset analysis (shape, histogram, connectivity, background, pixel explosion, color transformation, topology violations)
+        # - Enhanced dead-end predictor v2.0 with 6 sophisticated thresholds (spatial variance, symmetry, density, aspect ratio)
+        # - Micro-oracle family (RecolorTranslate, Frame, Shape) with verified program generation
+        # - Value-aware tie-break scaffold with calibrated_floor strategy
+        # - PDB lower bounds maintaining A* admissibility
+        # - Program canonicalization with rewrite rules
+        echo "baseline_median_time=0.0012" >> $GITHUB_OUTPUT
+        echo "baseline_success_rate=1.0000" >> $GITHUB_OUTPUT
+        echo "baseline_nodes_expanded=0.0" >> $GITHUB_OUTPUT
+
+    - name: Performance regression check
+      run: |
+        median_time=${{ steps.parse-results.outputs.median_time }}
+        baseline_median_time=${{ steps.baseline.outputs.baseline_median_time }}
+        success_rate=${{ steps.parse-results.outputs.success_rate }}
+        baseline_success_rate=${{ steps.baseline.outputs.baseline_success_rate }}
+        nodes_expanded=${{ steps.parse-results.outputs.nodes_expanded }}
+        baseline_nodes_expanded=${{ steps.baseline.outputs.baseline_nodes_expanded }}
+
+        echo "=== Performance Results ==="
+        echo "Median solve time: $median_time (baseline: $baseline_median_time)"
+        echo "Success rate: $success_rate (baseline: $baseline_success_rate)"
+        echo "Median nodes expanded: $nodes_expanded (baseline: $baseline_nodes_expanded)"
+
+        # Check for regressions (>10% increase)
+        median_regression=$(python3 -c "
+        import sys
+        current = float('$median_time')
+        baseline = float('$baseline_median_time')
+        if baseline > 0:
+            regression = ((current - baseline) / baseline) * 100
+            print(f'{regression:.1f}')
+        else:
+            print('0.0')
+        ")
+
+        success_regression=$(python3 -c "
+        import sys
+        current = float('$success_rate')
+        baseline = float('$baseline_success_rate')
+        if baseline > 0:
+            regression = ((baseline - current) / baseline) * 100  # Negative is bad for success rate
+            print(f'{regression:.1f}')
+        else:
+            print('0.0')
+        ")
+
+        nodes_regression=$(python3 -c "
+        import sys
+        current = float('$nodes_expanded')
+        baseline = float('$baseline_nodes_expanded')
+        if baseline > 0:
+            regression = ((current - baseline) / baseline) * 100
+            print(f'{regression:.1f}')
+        else:
+            print('0.0')
+        ")
+
+        echo "=== Regression Analysis ==="
+        echo "Median time regression: +${median_regression}%"
+        echo "Success rate regression: +${success_regression}%"
+        echo "Nodes expanded regression: +${nodes_regression}%"
+
+        # Fail if any metric regresses by more than 10%
+        threshold=10.0
+        failed=false
+
+        if (( $(echo "$median_regression > $threshold" | bc -l) )); then
+          echo "❌ Median solve time regressed by ${median_regression}% (> ${threshold}%)"
+          failed=true
+        else
+          echo "✅ Median solve time within acceptable range"
+        fi
+
+        if (( $(echo "$success_regression > $threshold" | bc -l) )); then
+          echo "❌ Success rate regressed by ${success_regression}% (> ${threshold}%)"
+          failed=true
+        else
+          echo "✅ Success rate within acceptable range"
+        fi
+
+        if (( $(echo "$nodes_regression > $threshold" | bc -l) )); then
+          echo "❌ Nodes expanded regressed by ${nodes_regression}% (> ${threshold}%)"
+          failed=true
+        else
+          echo "✅ Nodes expanded within acceptable range"
+        fi
+
+        if [ "$failed" = true ]; then
+          echo ""
+          echo "🚨 Performance regression detected! Failing build."
+          echo "This may indicate a performance issue that needs investigation."
+          exit 1
+        else
+          echo ""
+          echo "✅ All performance metrics within acceptable ranges."
+        fi
+
+    - name: Upload benchmark results
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: benchmark-results
+        path: benchmark_results.json

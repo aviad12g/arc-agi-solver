@@ -48,11 +48,19 @@ search_integration:
   original_beam_width: 64
   llm_beam_width: 8
   priority_boost: 1.0
-  
+
   # Fallback configuration
   fallback_on_parsing_failure: true  # Fallback if parsing fails
   fallback_on_timeout: true  # Fallback on generation timeout
   fallback_on_model_error: true  # Fallback on model errors
+
+# CLI Flag Mappings (mirror command-line interface options)
+# These correspond to CLI flags like --llm, --llm-model, --llm-proposals
+cli:
+  llm_enabled: ${search_integration.enabled}  # Maps to --llm flag
+  model_name: ${model.name}  # Maps to --llm-model flag
+  num_proposals: ${proposals.num_proposals}  # Maps to --llm-proposals flag
+  priority_boost: ${search_integration.priority_boost}  # Maps to --llm-priority-boost flag
 
 # Performance Monitoring
 monitoring:

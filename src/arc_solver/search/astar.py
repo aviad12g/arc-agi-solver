@@ -228,21 +228,68 @@ class AStarSearcher:
         self.config = config or SearchConfig()
         # Initialize heuristic system with optional gating from config
         try:
-            heur_cfg = {}
-            if hasattr(self.config, 'heuristics') and isinstance(self.config, SearchConfig):
-                # Best-effort access; in this codebase SearchConfig may not expose nested fields
-                heur_cfg = {}
-            # Pull YAML if available via create_cache_manager config path is out-of-scope here;
-            # rely on defaults and enable conservative gating inline below if env vars present
+
+            # Defaults
             use_tier2 = True
             tier2_threshold = 5.0
-            # Gating knobs via environment (optional) to avoid tight coupling
-            max_blob = int(os.environ.get('ARC_HEUR_T2_MAX_BLOB', '1000000000'))
-            min_depth = int(os.environ.get('ARC_HEUR_T2_MIN_DEPTH', '0'))
-            max_calls = int(os.environ.get('ARC_HEUR_T2_MAX_CALLS', '1000000000'))
-            dedupe = os.environ.get('ARC_HEUR_T2_DEDUPE', 'false').lower() == 'true'
-            greedy_large = os.environ.get('ARC_HEUR_T2_GREEDY_LARGE', 'false').lower() == 'true'
+            max_blob = 10**9
+            min_depth = 0
+            max_calls = 10**9
+            dedupe = False
+            greedy_large = False
+
+            # Prefer Hydra configuration if available
+            from arc_solver.config import get_config as _get_cfg
+            cfg = _get_cfg()
+            if cfg is not None and 'search' in cfg and 'heuristics' in cfg.search:
+                hcfg = cfg.search.heuristics
+                try:
+                    if 'use_tier2' in hcfg:
+                        use_tier2 = bool(hcfg.use_tier2)
+                except Exception:
+                    pass
+                try:
+                    if 'tier2_threshold' in hcfg:
+                        tier2_threshold = float(hcfg.tier2_threshold)
+                except Exception:
+                    pass
+                # Gating group
+                try:
+                    gating = hcfg.get('gating', {})
+                    if gating and getattr(gating, 'enable', False):
+                        if 'max_blob_for_tier2' in gating:
+                            max_blob = int(gating.max_blob_for_tier2)
+                        if 'min_depth_for_tier2' in gating:
+                            min_depth = int(gating.min_depth_for_tier2)
+                        if 'max_tier2_calls' in gating:
+                            max_calls = int(gating.max_tier2_calls)
+                        if 'dedupe_pairs' in gating:
+                            dedupe = bool(gating.dedupe_pairs)
+                        if 'use_greedy_fallback_when_large' in gating:
+                            greedy_large = bool(gating.use_greedy_fallback_when_large)
+                except Exception:
+                    pass
+
+            # Environment variables can override for quick experiments
+            try:
+                if 'ARC_HEUR_USE_T2' in os.environ:
+                    use_tier2 = os.environ['ARC_HEUR_USE_T2'].lower() == 'true'
+                if 'ARC_HEUR_T2_THRESHOLD' in os.environ:
+                    tier2_threshold = float(os.environ['ARC_HEUR_T2_THRESHOLD'])
+                if 'ARC_HEUR_T2_MAX_BLOB' in os.environ:
+                    max_blob = int(os.environ['ARC_HEUR_T2_MAX_BLOB'])
+                if 'ARC_HEUR_T2_MIN_DEPTH' in os.environ:
+                    min_depth = int(os.environ['ARC_HEUR_T2_MIN_DEPTH'])
+                if 'ARC_HEUR_T2_MAX_CALLS' in os.environ:
+                    max_calls = int(os.environ['ARC_HEUR_T2_MAX_CALLS'])
+                if 'ARC_HEUR_T2_DEDUPE' in os.environ:
+                    dedupe = os.environ['ARC_HEUR_T2_DEDUPE'].lower() == 'true'
+                if 'ARC_HEUR_T2_GREEDY_LARGE' in os.environ:
+                    greedy_large = os.environ['ARC_HEUR_T2_GREEDY_LARGE'].lower() == 'true'
+            except Exception:
+                pass
         except Exception:
+            # Fall back to safe defaults
             use_tier2 = True
             tier2_threshold = 5.0
             max_blob = 10**9
@@ -393,14 +440,43 @@ class AStarSearcher:
             try:
                 # Apply operation
                 new_grid = self.dsl_engine.apply_operation(node.grid, operation)
-                
+
                 # Create new program
                 new_program = node.program.append(operation)
-                
+
+                # Optional: conservative canonicalization of programs for caches
+                try:
+                    # Read canonicalization flag from Hydra config
+                    canonicalization_enabled = True  # Default to enabled
+                    saturation_enabled = False
+                    validate_smt = False
+                    try:
+                        from arc_solver.config import get_config as _get_cfg
+                        cfg = _get_cfg()
+                        if cfg is not None and 'search' in cfg and 'advanced' in cfg.search:
+                            advanced_cfg = cfg.search.advanced
+                            if 'canonicalization' in advanced_cfg:
+                                ccfg = advanced_cfg.canonicalization
+                                canonicalization_enabled = bool(ccfg.get('enabled', True))
+                                saturation_enabled = bool(ccfg.get('saturation_enabled', False))
+                                validate_smt = bool(ccfg.get('validate_smt', False))
+                    except Exception:
+                        pass
+
+                    if canonicalization_enabled:
+                        if saturation_enabled:
+                            from arc_solver.reasoning.egraph import saturate_program
+                            new_program = saturate_program(new_program, max_iters=5, validate_smt=validate_smt)
+                        else:
+                            from arc_solver.reasoning.rewrite_rules import canonicalize_program
+                            new_program = canonicalize_program(new_program)
+                except Exception:
+                    pass
+
                 # Compute heuristic
                 heuristic_result = self.heuristic_system.compute_heuristic(new_grid, target_grid)
                 self.statistics.heuristic_computations += 1
-                
+
                 # Create successor node
                 successor = SearchNode(
                     grid=new_grid,
@@ -411,9 +487,73 @@ class AStarSearcher:
                     action=operation,
                     depth=node.depth + 1
                 )
-                
+
+                # Optional UNSAT cache check (configured via Hydra)
+                try:
+                    # Read UNSAT cache flag from Hydra config
+                    unsat_cache_enabled = False  # Default to disabled for safety
+                    try:
+                        from arc_solver.config import get_config as _get_cfg
+                        cfg = _get_cfg()
+                        if cfg is not None and 'search' in cfg and 'advanced' in cfg.search:
+                            advanced_cfg = cfg.search.advanced
+                            if 'unsat_cache' in advanced_cfg and 'enabled' in advanced_cfg.unsat_cache:
+                                unsat_cache_enabled = bool(advanced_cfg.unsat_cache.enabled)
+                    except Exception:
+                        pass
+
+                    if unsat_cache_enabled:
+                        from arc_solver.search.unsat_cache import UNSATCache, make_signature
+                        if not hasattr(self, '_unsat_cache'):
+                            self._unsat_cache = UNSATCache()
+
+                            # Load pre-computed signatures if configured
+                            try:
+                                from arc_solver.config import get_config as _get_cfg
+                                cfg = _get_cfg()
+                                if cfg is not None and 'search' in cfg and 'advanced' in cfg.search:
+                                    advanced_cfg = cfg.search.advanced
+                                    if ('unsat_cache' in advanced_cfg and
+                                        'signatures_file' in advanced_cfg.unsat_cache and
+                                        advanced_cfg.unsat_cache.signatures_file):
+                                        signatures_file = str(advanced_cfg.unsat_cache.signatures_file)
+                                        loaded_count = self._unsat_cache.load_from_jsonl(signatures_file)
+                                        if loaded_count > 0:
+                                            logger.info(f"Loaded {loaded_count} pre-computed UNSAT signatures")
+                            except Exception as e:
+                                logger.warning(f"Failed to load UNSAT signatures: {e}")
+
+                        sig = make_signature(new_grid, target_grid)
+                        if self._unsat_cache.is_unsat(sig):
+                            # Skip known-impossible region
+                            continue
+                except Exception:
+                    pass
+
+                # Optional dead-end predictor gating (configured via Hydra)
+                try:
+                    deadend_enabled = False
+                    try:
+                        from arc_solver.config import get_config as _get_cfg
+                        cfg = _get_cfg()
+                        if cfg is not None and 'search' in cfg and 'advanced' in cfg.search:
+                            advanced_cfg = cfg.search.advanced
+                            if 'deadend_predictor' in advanced_cfg and 'enabled' in advanced_cfg.deadend_predictor:
+                                deadend_enabled = bool(advanced_cfg.deadend_predictor.enabled)
+                    except Exception:
+                        pass
+
+                    if deadend_enabled:
+                        from arc_solver.search.dead_end_predictor import DeadEndPredictor
+                        if not hasattr(self, '_deadend_pred'):
+                            self._deadend_pred = DeadEndPredictor()
+                        if self._deadend_pred.should_gate(new_grid, target_grid):
+                            continue
+                except Exception:
+                    pass
+
                 successors.append(successor)
-                
+
             except Exception as e:
                 logger.debug(f"Failed to apply operation {operation}: {e}")
                 continue

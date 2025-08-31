@@ -6,6 +6,7 @@ defaults:
   - reasoning: default
   - search: default
   - system: default
+  - development: default
   - _self_
 
 # Global solver settings
